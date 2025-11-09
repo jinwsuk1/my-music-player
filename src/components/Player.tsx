@@ -1,0 +1,544 @@
+// src/components/Player.tsx
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import Spectrum from './Spectrum';
+import type { Track } from '../data/tracks';
+import { fmt } from '../utils/time';
+
+/* ---------- Small utils & Icons ---------- */
+const cx = (...a: string[]) => a.filter(Boolean).join(' ');
+
+const PlayIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path d="M8 5v14l11-7-11-7z" fill="currentColor" />
+  </svg>
+);
+const PauseIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path d="M6 5h5v14H6zM13 5h5v14h-5z" fill="currentColor" />
+  </svg>
+);
+const PrevIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path d="M6 5h2v14H6zM20 19V5l-11 7 11 7z" fill="currentColor" />
+  </svg>
+);
+const NextIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path d="M16 5h2v14h-2zM4 19l11-7L4 5v14z" fill="currentColor" />
+  </svg>
+);
+const VolumeIcon = ({ volume }: { volume: number }) => {
+  if (volume <= 0.001) {
+    return (
+      <svg viewBox="0 0 24 24" width="20" height="20">
+        <path d="M5 10v4h4l5 4V6l-5 4H5z" fill="currentColor" />
+        <path
+          d="M19 9l-1.4 1.4L17 9.8 18.6 8.2 17 6.6 18.4 5.2 20 6.8 21.6 5.2 23 6.6 21.4 8.2 23 9.8 21.6 11.2 20 9.6 18.4 11.2z"
+          fill="currentColor"
+        />
+      </svg>
+    );
+  }
+  if (volume < 0.5) {
+    return (
+      <svg viewBox="0 0 24 24" width="20" height="20">
+        <path d="M5 10v4h4l5 4V6l-5 4H5z" fill="currentColor" />
+        <path d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z" fill="currentColor" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20">
+      <path d="M5 10v4h4l5 4V6l-5 4H5z" fill="currentColor" />
+      <path d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z" fill="currentColor" />
+      <path d="M19.5 12a5.5 5.5 0 0 0-3.5-5.17v10.34A5.5 5.5 0 0 0 19.5 12z" fill="currentColor" />
+    </svg>
+  );
+};
+const ShuffleIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path
+      d="M17 3h4v4h-2V6h-2a4 4 0 0 0-3.2 1.6L9.6 14A6 6 0 0 1 5 16H3v-2h2a4 4 0 0 0 3.2-1.6l4.2-6A6 6 0 0 1 17 3zM15.8 14.4 14.4 16A6 6 0 0 0 17 17h2v-1h2v4h-4v-2h-2a4 4 0 0 1-3.2-1.6l1.4-1.4a2 2 0 0 0 1.8 1zM7 7H3V5h4v2z"
+      fill="currentColor"
+    />
+  </svg>
+);
+const RepeatIcon = (p: React.SVGProps<SVGSVGElement>) => (
+  <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
+    <path d="M7 7h9V5l4 3.5L16 12v-2H7a3 3 0 0 0-3 3v1H2v-1a5 5 0 0 1 5-5zm10 10H8v2l-4-3.5L8 12v2h9a3 3 0 0 1 3 3v1h2v-1a5 5 0 0 0-5-5z" fill="currentColor" />
+  </svg>
+);
+
+/* ---------- Persistence ---------- */
+type PersistState = {
+  index: number;
+  volume: number;
+  userTracks: Track[];
+};
+const STORAGE_KEY = 'music-player-state';
+
+function loadState(): PersistState | null {
+  try {
+    const s = localStorage.getItem(STORAGE_KEY);
+    return s ? JSON.parse(s) : null;
+  } catch {
+    return null;
+  }
+}
+function saveState(state: PersistState) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+type RepeatMode = 'off' | 'one' | 'all';
+
+export default function Player({ tracks }: { tracks: Track[] }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  const baseLenRef = useRef<number>(tracks.length);
+  const [list, setList] = useState<Track[]>(tracks);
+  const [currentIndex, setCurrentIndex] = useState(0);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+
+  const [shuffle, setShuffle] = useState(false);
+  const [repeat, setRepeat] = useState<RepeatMode>('off');
+
+  // volume popover state
+  const [volOpen, setVolOpen] = useState(false);
+  const volTimerRef = useRef<number | null>(null);
+  const openVol = () => {
+    if (volTimerRef.current) {
+      window.clearTimeout(volTimerRef.current);
+      volTimerRef.current = null;
+    }
+    setVolOpen(true);
+  };
+  const closeVolDelayed = () => {
+    if (volTimerRef.current) window.clearTimeout(volTimerRef.current);
+    volTimerRef.current = window.setTimeout(() => setVolOpen(false), 180);
+  };
+
+  const track = list[currentIndex];
+  const isEmpty = list.length === 0;
+
+  /* ---------- Audio events ---------- */
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+
+    const onLoaded = () => setDuration(el.duration || 0);
+    const onTime = () => setCurrent(el.currentTime || 0);
+    const onEnded = () => {
+      if (repeat === 'one') {
+        el.currentTime = 0;
+        el.play().catch(() => setIsPlaying(false));
+        return;
+      }
+      next(true);
+    };
+
+    el.addEventListener('loadedmetadata', onLoaded);
+    el.addEventListener('timeupdate', onTime);
+    el.addEventListener('ended', onEnded);
+
+    return () => {
+      el.removeEventListener('loadedmetadata', onLoaded);
+      el.removeEventListener('timeupdate', onTime);
+      el.removeEventListener('ended', onEnded);
+    };
+  }, [track?.src, repeat]);
+
+  // keep play state when index changes
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    setCurrent(0);
+    if (isPlaying) el.play().catch(() => setIsPlaying(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIndex]);
+
+  // ensure element volume follows state (src remount resets to 1.0)
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.volume = volume;
+  }, [track?.src, volume]);
+
+  /* ---------- Initial restore ---------- */
+  useEffect(() => {
+    const s = loadState();
+    if (!s) return;
+
+    const added = s.userTracks?.length ?? 0;
+    if (added) setList((prev) => [...prev, ...s.userTracks!]);
+
+    const maxIndex = Math.max(0, baseLenRef.current + added - 1);
+    const safeIndex = Math.min(Math.max(0, s.index ?? 0), maxIndex);
+    setCurrentIndex(safeIndex);
+
+    const vol = s.volume ?? 1;
+    setVolume(vol);
+    if (audioRef.current) audioRef.current.volume = vol;
+  }, []);
+
+  // persist
+  useEffect(() => {
+    const userTracks = list.slice(baseLenRef.current);
+    saveState({ index: currentIndex, volume, userTracks });
+  }, [currentIndex, volume, list]);
+
+  /* ---------- Controls ---------- */
+  const togglePlay = () => {
+    const el = audioRef.current;
+    if (!el) return;
+    if (isPlaying) el.pause();
+    else el.play();
+    setIsPlaying(!isPlaying);
+  };
+
+  const seek = (sec: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    el.currentTime = sec;
+    setCurrent(sec);
+  };
+
+  const changeVolume = (v: number) => {
+    const el = audioRef.current;
+    if (!el) return;
+    const nv = Math.max(0, Math.min(1, v));
+    el.volume = nv;
+    setVolume(nv);
+  };
+
+  const randomOther = (i: number) => {
+    if (list.length <= 1) return i;
+    let j = i;
+    while (j === i) j = Math.floor(Math.random() * list.length);
+    return j;
+  };
+
+  const prev = () => {
+    setCurrentIndex((i) => {
+      const ni = shuffle ? randomOther(i) : i - 1;
+      return list.length ? (ni + list.length) % list.length : 0;
+    });
+    setIsPlaying(true);
+  };
+
+  const next = (fromEnded = false) => {
+    setCurrentIndex((i) => {
+      if (!list.length) return 0;
+      if (!shuffle) {
+        const ni = i + 1;
+        if (ni >= list.length) {
+          if (fromEnded && repeat === 'all') return 0;
+          if (fromEnded && repeat === 'off') {
+            setIsPlaying(false);
+            return i;
+          }
+          return 0;
+        }
+        return ni;
+      }
+      return randomOther(i);
+    });
+    setIsPlaying(true);
+  };
+
+  // playlist select: toggle if same, otherwise switch
+  const select = (i: number) => {
+    const el = audioRef.current;
+    if (i < 0 || i >= list.length || !el) return;
+
+    if (i === currentIndex) {
+      if (isPlaying) {
+        el.pause();
+        setIsPlaying(false);
+      } else {
+        el.play().catch(() => setIsPlaying(false));
+        setIsPlaying(true);
+      }
+    } else {
+      setCurrentIndex(i);
+      setIsPlaying(true);
+    }
+  };
+
+  /* ---------- Upload ---------- */
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    e.currentTarget.value = '';
+    if (!f) return;
+
+    try {
+      const url = URL.createObjectURL(f);
+      const t: Track = { title: f.name, artist: 'Local', src: url };
+      const wasEmpty = list.length === 0;
+      setList(prev => [...prev, t]);
+      
+      if (wasEmpty) {
+        setCurrentIndex(0);
+        setIsPlaying(false);
+      }  
+      
+    } catch {}
+  };
+
+  const canDelete = (i: number) => i >= baseLenRef.current;
+  const removeAt = (i: number) => {
+    setList((prev) => {
+      const removed = prev[i];
+      const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
+
+      setCurrentIndex((ci) => {
+        if (i === ci) {
+          if (nextList.length === 0) return 0;
+          return Math.min(ci, nextList.length - 1);
+        }
+        return i < ci ? ci - 1 : ci;
+      });
+
+      if (removed?.src?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(removed.src);
+        } catch {}
+      }
+      return nextList;
+    });
+  };
+
+  /* ---------- Keyboard shortcuts ---------- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (document.activeElement as HTMLElement | null)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key === 'ArrowLeft') {
+        seek(Math.max(0, current - 5));
+      } else if (e.key === 'ArrowRight') {
+        seek(Math.min(duration, current + 5));
+      } else if (e.key === 'ArrowUp') {
+        changeVolume(volume + 0.05);
+      } else if (e.key === 'ArrowDown') {
+        changeVolume(volume - 0.05);
+      } else if (e.key.toLowerCase() === 's') {
+        setShuffle((v) => !v);
+      } else if (e.key.toLowerCase() === 'r') {
+        setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'));
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [current, duration, volume, isPlaying]);
+
+  const repeatLabel = useMemo(
+    () => (repeat === 'off' ? 'Repeat Off' : repeat === 'all' ? 'Repeat All' : 'Repeat One'),
+    [repeat]
+  );
+
+  /* ---------- UI ---------- */
+  return (
+    <div className="space-y-5">
+      {isEmpty ? (
+        <div className="space-y-4">
+          <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
+          <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
+            <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
+            Add local track
+          </label>
+          <p className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</p>
+        </div>
+      ) : (
+        <>
+          {/* Header */}
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="m-0 text-xl md:text-2xl font-semibold">{track?.title ?? 'No track'}</h2>
+              <p className="mt-1 text-sm text-neutral-400">{track?.artist ?? ''}</p>
+            </div>
+          </div>
+
+          {/* Spectrum */}
+          {track?.src ? <Spectrum audioRef={audioRef} /> : null}
+
+          {/* Audio element (force remount on src) */}
+          <audio key={track?.src || 'empty'} ref={audioRef} src={track?.src} preload="metadata" />
+
+          {/* Seek bar */}
+          <div className="space-y-2">
+            <input
+              className="w-full accent-violet-500"
+              type="range"
+              min={0}
+              max={duration || 0}
+              step="0.1"
+              value={current}
+              onChange={(e) => seek(Number(e.target.value))}
+            />
+            <div className="flex justify-between text-xs text-neutral-400">
+              <span>{fmt(current)}</span>
+              <span>{fmt(duration)}</span>
+            </div>
+          </div>
+
+          {/* Controls row */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={prev}
+              className="p-2 rounded-full bg-neutral-800 border border-neutral-700 hover:bg-neutral-750 transition"
+              aria-label="Previous"
+            >
+              <PrevIcon />
+            </button>
+
+            <button
+              onClick={togglePlay}
+              className="p-3 rounded-full bg-violet-600 hover:bg-violet-500 text-white shadow-sm transition"
+              aria-label={isPlaying ? 'Pause' : 'Play'}
+            >
+              {isPlaying ? <PauseIcon /> : <PlayIcon />}
+            </button>
+
+            <button
+              onClick={() => next(false)}
+              className="p-2 rounded-full bg-neutral-800 border border-neutral-700 hover:bg-neutral-750 transition"
+              aria-label="Next"
+            >
+              <NextIcon />
+            </button>
+
+            {/* Right side icons */}
+            <div className="ml-auto flex items-center gap-2">
+              {/* Volume (popover left, horizontal slider) */}
+              <div className="relative" onMouseEnter={openVol} onMouseLeave={closeVolDelayed}>
+                <button
+                  onClick={() => setVolOpen((v) => !v)}
+                  className="p-2 rounded-full border bg-neutral-800 transition border-neutral-700 hover:bg-neutral-750"
+                  aria-label="Volume"
+                  aria-expanded={volOpen}
+                >
+                  <VolumeIcon volume={volume} />
+                </button>
+
+                {volOpen && (
+                  <div
+                    className="absolute top-1/2 right-12 -translate-y-1/2 z-20"
+                    onMouseEnter={openVol}
+                    onMouseLeave={closeVolDelayed}
+                  >
+                    <div className="rounded-xl border border-neutral-700 bg-neutral-900/90 px-3 py-2 shadow-xl">
+                      <input
+                        className="hslider"
+                        type="range"
+                        min={0}
+                        max={1}
+                        step={0.01}
+                        value={volume}
+                        style={{ ['--p' as any]: `${Math.round(volume * 100)}%` }}
+                        onChange={(e) => changeVolume(Number(e.target.value))}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Shuffle */}
+              <button
+                onClick={() => setShuffle((v) => !v)}
+                className={cx(
+                  'p-2 rounded-full border transition',
+                  shuffle
+                    ? 'bg-neutral-800 border-violet-600 text-violet-300'
+                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750'
+                )}
+                aria-pressed={shuffle}
+                aria-label="Shuffle"
+              >
+                <ShuffleIcon />
+              </button>
+
+              {/* Repeat */}
+              <button
+                onClick={() => setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'))}
+                className={cx(
+                  'relative p-2 rounded-full border transition',
+                  repeat !== 'off'
+                    ? 'bg-neutral-800 border-violet-600 text-violet-300'
+                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750'
+                )}
+                aria-label={repeatLabel}
+                title={repeatLabel}
+              >
+                <RepeatIcon />
+                {repeat === 'one' && (
+                  <span
+                    className="absolute -top-1 -right-1 w-4 h-4 rounded-full
+                               bg-violet-600 text-[10px] leading-4 text-white
+                               grid place-items-center shadow"
+                  >
+                    1
+                  </span>
+                )}
+              </button>
+            </div>
+          </div>
+
+          {/* Upload */}
+          <div className="flex items-center gap-3">
+            <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
+              <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
+              Add local track
+            </label>
+            <span className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</span>
+          </div>
+
+          {/* Playlist */}
+          <div>
+            <h3 className="text-sm font-semibold text-neutral-300 mb-2">Playlist</h3>
+            <ul className="space-y-2">
+              {list.map((t, i) => {
+                const active = i === currentIndex;
+                return (
+                  <li key={`${t.title}-${i}`} className="flex items-center gap-2">
+                    <button
+                      onClick={() => select(i)}
+                      className={cx(
+                        'flex-1 text-left px-3 py-2 rounded-xl border transition',
+                        active
+                          ? 'bg-neutral-800/80 border-neutral-700'
+                          : 'bg-neutral-900/30 border-neutral-800 hover:bg-neutral-800/40 hover:border-neutral-700'
+                      )}
+                    >
+                      <div className="font-medium truncate">{t.title}</div>
+                      <div className="text-xs text-neutral-400 truncate">{t.artist}</div>
+                    </button>
+
+                    {canDelete(i) && (
+                      <button
+                        onClick={() => removeAt(i)}
+                        className="px-2.5 py-2 rounded-lg bg-neutral-800 border border-neutral-700 hover:bg-neutral-750 text-xs transition"
+                        title="Remove uploaded track"
+                      >
+                        삭제
+                      </button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
