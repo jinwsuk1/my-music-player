@@ -13,6 +13,13 @@ The React Compiler is not enabled on this template because of its impact on dev 
 
 ## Expanding the ESLint configuration
 
+## Getting Started
+npm ci
+npm run dev
+
+## Node
+Node 20.x 권장 (예: 20.11.1)
+
 If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
 
 ```js
