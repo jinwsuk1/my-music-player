@@ -368,11 +368,13 @@ export default function Player({ tracks }: { tracks: Track[] }) {
             </div>
           </div>
 
-          {/* Spectrum */}
-          {track?.src ? <Spectrum audioRef={audioRef} /> : null}
-
-          {/* Audio element (force remount on src) */}
-          <audio key={track?.src || 'empty'} ref={audioRef} src={track?.src} preload="metadata" />
+          <audio
+            key={track?.src || 'empty'}
+            ref={audioRef}
+            src={track?.src}
+            preload="metadata"
+          />
+          {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
 
           {/* Seek bar */}
           <div className="space-y-2">
