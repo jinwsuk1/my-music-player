@@ -96,3 +96,17 @@ input[type="range"].hslider::-moz-range-thumb {
   background: #8b5cf6;
   border: 2px solid #111827;
 }
+
+/* DragOverlay drop animation 효과 클래스 (dnd-kit sideEffects에서 씀) */
+.drag-overlay-active{
+  filter: brightness(1.03);
+}
+
+/* 드래그 미리보기(클론) 스타일 */
+.drag-ghost {
+  border: 1px solid #6b21a8;          /* violet-800 근사 */
+  background: rgba(24, 24, 27, 0.95); /* neutral-900/95 */
+  box-shadow: 0 10px 24px rgba(0,0,0,0.45);
+  border-radius: 12px;
+  opacity: 0.95;
+}
