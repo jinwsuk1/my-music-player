@@ -69,15 +69,30 @@ const RepeatIcon = (p: React.SVGProps<SVGSVGElement>) => (
   </svg>
 );
 
-/* ---------- Persistence ---------- */
-type PersistState = {
+/* ---------- Playlists & Persistence ---------- */
+type RepeatMode = 'off' | 'one' | 'all';
+type Playlist = { id: number; name: string; tracks: Track[] };
+
+/* Old format (for backward compatibility) */
+type PersistStateOld = {
   index: number;
   volume: number;
   userTracks: Track[];
 };
+
+/* New format with playlists */
+type PersistState = {
+  index: number;
+  volume: number;
+  playlists: Playlist[];
+  currentPlaylistId: number;
+  shuffle: boolean;
+  repeat: RepeatMode;
+};
+
 const STORAGE_KEY = 'music-player-state';
 
-function loadState(): PersistState | null {
+function loadState(): PersistState | PersistStateOld | null {
   try {
     const s = localStorage.getItem(STORAGE_KEY);
     return s ? JSON.parse(s) : null;
@@ -91,24 +106,30 @@ function saveState(state: PersistState) {
   } catch {}
 }
 
-type RepeatMode = 'off' | 'one' | 'all';
-
 export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  const baseLenRef = useRef<number>(tracks.length);
-  const [list, setList] = useState<Track[]>(tracks);
-  const [currentIndex, setCurrentIndex] = useState(0);
+  /* Default playlist contains initial tracks */
+  const [playlists, setPlaylists] = useState<Playlist[]>([
+    { id: 1, name: '기본 플레이리스트', tracks }
+  ]);
+  const [currentPlaylistId, setCurrentPlaylistId] = useState<number>(1);
 
+  /* Keep base length of initial tracks in default playlist for delete rule */
+  const baseLenRef = useRef<number>(tracks.length);
+
+  /* Playback state */
+  const [currentIndex, setCurrentIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
 
+  /* Modes */
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('off');
 
-  // volume popover
+  /* Volume popover */
   const [volOpen, setVolOpen] = useState(false);
   const volTimerRef = useRef<number | null>(null);
   const openVol = () => {
@@ -123,16 +144,19 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     volTimerRef.current = window.setTimeout(() => setVolOpen(false), 180);
   };
 
-  // Drag state (HTML5 DnD)
+  /* Drag state (HTML5 DnD) */
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
   const isDragging = dragFrom !== null;
 
-  // 드래그 미리보기 정밀 위치 + 클릭 억제
+  /* Drag preview + click suppression */
   const itemRefs = useRef<(HTMLLIElement | null)[]>([]);
   const ghostRef = useRef<HTMLElement | null>(null);
   const wasDraggingRef = useRef(false);
 
+  /* Derived from current playlist */
+  const currentPlaylist = playlists.find(p => p.id === currentPlaylistId) || playlists[0];
+  const list = currentPlaylist?.tracks ?? [];
   const track = list[currentIndex];
   const isEmpty = list.length === 0;
 
@@ -163,14 +187,14 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     };
   }, [track?.src, repeat]);
 
-  // keep play state when index changes
+  // keep play state when index or playlist changes
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
     setCurrent(0);
     if (isPlaying) el.play().catch(() => setIsPlaying(false));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIndex]);
+  }, [currentIndex, currentPlaylistId]);
 
   // ensure element volume follows state (src remount resets to 1.0)
   useEffect(() => {
@@ -179,28 +203,72 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     el.volume = volume;
   }, [track?.src, volume]);
 
-  /* ---------- Initial restore ---------- */
+  /* ---------- Initial restore (supports old and new formats) ---------- */
   useEffect(() => {
     const s = loadState();
     if (!s) return;
 
-    const added = s.userTracks?.length ?? 0;
-    if (added) setList((prev) => [...prev, ...s.userTracks!]);
+    // Old format: append userTracks to default playlist
+    if ('userTracks' in (s as PersistStateOld)) {
+      const old = s as PersistStateOld;
+      const added = old.userTracks?.length ?? 0;
 
-    const maxIndex = Math.max(0, baseLenRef.current + added - 1);
-    const safeIndex = Math.min(Math.max(0, s.index ?? 0), maxIndex);
+      setPlaylists(prev =>
+        prev.map(p =>
+          p.id === 1 ? { ...p, tracks: [...p.tracks, ...(old.userTracks || [])] } : p
+        )
+      );
+
+      const maxIndex = Math.max(0, baseLenRef.current + added - 1);
+      const safeIndex = Math.min(Math.max(0, old.index ?? 0), maxIndex);
+      setCurrentIndex(safeIndex);
+
+      const vol = old.volume ?? 1;
+      setVolume(vol);
+      if (audioRef.current) audioRef.current.volume = vol;
+
+      // keep default playlist selected
+      setCurrentPlaylistId(1);
+      return;
+    }
+
+    // New format with playlists
+    const n = s as PersistState;
+    if (Array.isArray(n.playlists) && n.playlists.length) {
+      setPlaylists(n.playlists);
+      // Recompute baseLenRef for default playlist (protect original segment)
+      const def = n.playlists.find(p => p.id === 1);
+      if (def) baseLenRef.current = Math.min(baseLenRef.current, def.tracks.length);
+    }
+
+    setCurrentPlaylistId(n.currentPlaylistId ?? 1);
+
+    const maxIndex =
+      (n.playlists?.find(p => p.id === (n.currentPlaylistId ?? 1))?.tracks.length ?? 0) - 1;
+    const safeIndex = Math.min(Math.max(0, n.index ?? 0), Math.max(0, maxIndex));
     setCurrentIndex(safeIndex);
 
-    const vol = s.volume ?? 1;
+    const vol = n.volume ?? 1;
     setVolume(vol);
     if (audioRef.current) audioRef.current.volume = vol;
+
+    setShuffle(!!n.shuffle);
+    setRepeat(n.repeat ?? 'off');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // persist
+  /* ---------- Persist ---------- */
   useEffect(() => {
-    const userTracks = list.slice(baseLenRef.current);
-    saveState({ index: currentIndex, volume, userTracks });
-  }, [currentIndex, volume, list]);
+    const state: PersistState = {
+      index: currentIndex,
+      volume,
+      playlists,
+      currentPlaylistId,
+      shuffle,
+      repeat
+    };
+    saveState(state);
+  }, [currentIndex, volume, playlists, currentPlaylistId, shuffle, repeat]);
 
   /* ---------- Controls ---------- */
   const togglePlay = () => {
@@ -260,6 +328,11 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     });
     setIsPlaying(true);
   };
+  const repeatLabel = useMemo(() => {
+  if (repeat === 'off') return 'Repeat Off';
+  if (repeat === 'all') return 'Repeat All';
+  return 'Repeat One';
+}, [repeat]);
 
   // playlist select: toggle if same, otherwise switch
   const select = (i: number) => {
@@ -285,7 +358,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     }
   };
 
-  /* ---------- Upload ---------- */
+  /* ---------- Upload (to current playlist) ---------- */
   const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
     e.currentTarget.value = '';
@@ -296,7 +369,11 @@ export default function Player({ tracks }: { tracks: Track[] }) {
       const t: Track = { title: f.name, artist: 'Local', src: url };
 
       const wasEmpty = list.length === 0;
-      setList((prev) => [...prev, t]);
+      setPlaylists((prev) =>
+        prev.map(p =>
+          p.id === currentPlaylistId ? { ...p, tracks: [...p.tracks, t] } : p
+        )
+      );
 
       if (wasEmpty) {
         setCurrentIndex(0);   // 첫 추가는 선택만
@@ -305,62 +382,40 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     } catch {}
   };
 
-  const canDelete = (i: number) => i >= baseLenRef.current;
-  const removeAt = (i: number) => {
-    setList((prev) => {
-      const removed = prev[i];
-      const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
-
-      setCurrentIndex((ci) => {
-        if (i === ci) {
-          if (nextList.length === 0) return 0;
-          return Math.min(ci, nextList.length - 1);
-        }
-        return i < ci ? ci - 1 : ci;
-      });
-
-      if (removed?.src?.startsWith('blob:')) {
-        try {
-          URL.revokeObjectURL(removed.src);
-        } catch {}
-      }
-      return nextList;
-    });
+  // deletion rule: default playlist protects base tracks; other playlists deletable entirely
+  const canDelete = (i: number) => {
+    if (currentPlaylistId !== 1) return true;
+    return i >= baseLenRef.current;
   };
 
-  /* ---------- Keyboard shortcuts ---------- */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const tag = (document.activeElement as HTMLElement | null)?.tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+  const removeAt = (i: number) => {
+    setPlaylists((prev) =>
+      prev.map(p =>
+        p.id === currentPlaylistId
+          ? { ...p, tracks: p.tracks.slice(0, i).concat(p.tracks.slice(i + 1)) }
+          : p
+      )
+    );
 
-      if (e.code === 'Space') {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.key === 'ArrowLeft') {
-        seek(Math.max(0, current - 5));
-      } else if (e.key === 'ArrowRight') {
-        seek(Math.min(duration, current + 5));
-      } else if (e.key === 'ArrowUp') {
-        changeVolume(volume + 0.05);
-      } else if (e.key === 'ArrowDown') {
-        changeVolume(volume - 0.05);
-      } else if (e.key.toLowerCase() === 's') {
-        setShuffle((v) => !v);
-      } else if (e.key.toLowerCase() === 'r') {
-        setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'));
+    // adjust index relative to current list snapshot
+    setCurrentIndex((ci) => {
+      const nextLen = list.length - 1;
+      if (i === ci) {
+        if (nextLen <= 0) return 0;
+        return Math.min(ci, nextLen - 1);
       }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [current, duration, volume, isPlaying]);
+      return i < ci ? ci - 1 : ci;
+    });
 
-  const repeatLabel = useMemo(
-    () => (repeat === 'off' ? 'Repeat Off' : repeat === 'all' ? 'Repeat All' : 'Repeat One'),
-    [repeat]
-  );
+    const removed = list[i];
+    if (removed?.src?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(removed.src);
+      } catch {}
+    }
+  };
 
-  /* ---------- Reorder helpers ---------- */
+  /* ---------- Reorder helpers (current playlist only) ---------- */
   const reorder = (arr: Track[], from: number, to: number) => {
     const next = arr.slice();
     const [item] = next.splice(from, 1);
@@ -370,7 +425,13 @@ export default function Player({ tracks }: { tracks: Track[] }) {
 
   const applyReorder = (from: number, to: number) => {
     if (from === to) return;
-    setList((prev) => reorder(prev, from, to));
+
+    setPlaylists(prev =>
+      prev.map(p =>
+        p.id === currentPlaylistId ? { ...p, tracks: reorder(p.tracks, from, to) } : p
+      )
+    );
+
     // currentIndex 재계산
     setCurrentIndex((ci) => {
       if (ci === from) return to;
@@ -441,10 +502,65 @@ export default function Player({ tracks }: { tracks: Track[] }) {
 
   /* ---------- UI ---------- */
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
+      {/* Playlists header */}
+      <div>
+        <h3 className="text-sm font-semibold text-neutral-300 mb-2">Playlists</h3>
+        <ul className="flex flex-wrap gap-2">
+          {playlists.map(p => (
+            <li key={p.id}>
+              <button
+                onClick={() => {
+                  setCurrentPlaylistId(p.id);
+                  setCurrentIndex(0);
+                  itemRefs.current = [];
+                }}
+                className={cx(
+                  'px-3 py-1 rounded-lg border transition',
+                  p.id === currentPlaylistId
+                    ? 'bg-violet-600 text-white border-violet-500'
+                    : 'bg-neutral-800 text-neutral-300 border-neutral-700 hover:bg-neutral-750'
+                )}
+              >
+                {p.name}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <div className="mt-2 flex gap-2">
+          <button
+            onClick={() => {
+              const newId = Date.now();
+              const newName = `새 플레이리스트 ${playlists.length + 1}`;
+              setPlaylists(prev => [...prev, { id: newId, name: newName, tracks: [] }]);
+              setCurrentPlaylistId(newId);
+              setCurrentIndex(0);
+              itemRefs.current = [];
+            }}
+            className="px-3 py-1 rounded-lg bg-neutral-700 text-white"
+          >
+           + 새 플레이리스트
+          </button>
+          {currentPlaylistId !== 1 && (
+            <button
+              onClick={() => {
+                setPlaylists(prev => prev.filter(p => p.id !== currentPlaylistId));
+                // fallback to default playlist
+                setCurrentPlaylistId(1);
+                setCurrentIndex(0);
+                itemRefs.current = [];
+              }}
+              className="px-3 py-1 rounded-lg bg-neutral-800 text-neutral-300 border border-neutral-700 hover:bg-neutral-750 transition"
+            >
+              현재 플레이리스트 삭제
+            </button>
+          )}
+        </div>
+      </div>
+
       {isEmpty ? (
         <div className="space-y-4">
-          <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
+          <p className="text-neutral-300">선택된 플레이리스트에 곡이 없습니다.</p>
           <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
             <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
             Add local track
@@ -616,7 +732,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                     onDrop={(e) => onDropItem(i, e)}
                     onDragEnd={onDragEnd}
                   >
-                    {/* 시각적 핸들(이제 클릭은 필요 없지만 힌트로 유지) */}
+                    {/* 시각적 핸들(힌트) */}
                     <div className="px-2 cursor-grab text-neutral-500" title="Drag to reorder">⋮⋮</div>
 
                     {/* 본문 클릭으로 재생/일시정지 (드래그 직후 클릭 억제) */}
@@ -628,7 +744,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                       <div className="text-xs text-neutral-400 truncate">{t.artist}</div>
                     </button>
 
-                    {/* 삭제(업로드 항목만) */}
+                    {/* 삭제(규칙 적용) */}
                     {canDelete(i) && (
                       <button
                         onClick={() => removeAt(i)}
