@@ -1,8 +1,13 @@
+import { storage } from '@/firebase';
+import { useAuth } from '@/auth/AuthContext';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import Spectrum from './Spectrum';
 import type { Track } from '../data/tracks';
 import { fmt } from '../utils/time';
+import { loadUserPlaylist, saveUserPlaylist } from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
 const cx = (...a: string[]) => a.filter(Boolean).join(' ');
@@ -95,6 +100,7 @@ type RepeatMode = 'off' | 'one' | 'all';
 
 export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const { user } = useAuth();  // ← 추가
 
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
@@ -196,11 +202,57 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     if (audioRef.current) audioRef.current.volume = vol;
   }, []);
 
-  // persist
+    // 로그인한 사용자의 Firestore 플레이리스트 불러오기
+  useEffect(() => {
+    if (!user) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const remoteTracks = await loadUserPlaylist(user.uid);
+        if (cancelled) return;
+
+        if (remoteTracks.length === 0) {
+          // 서버에 아직 아무것도 없으면, 현재 로컬 상태(userTracks)를 업로드해도 됨.
+          const userTracks = list.slice(baseLenRef.current);
+          await saveUserPlaylist(user.uid, userTracks);
+          return;
+        }
+
+        // 기본 tracks + 원격 tracks로 리스트 교체
+        setList(() => {
+          const base = tracks.slice(0, baseLenRef.current);
+          return [...base, ...remoteTracks];
+        });
+
+        // 서버 기준으로는 첫 곡부터 재생
+        setCurrentIndex(0);
+      } catch (e) {
+        console.error('원격 플레이리스트 로딩 실패:', e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, tracks]);
+
+   // persist (localStorage + Firestore 동기화)
   useEffect(() => {
     const userTracks = list.slice(baseLenRef.current);
+
+    // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
     saveState({ index: currentIndex, volume, userTracks });
-  }, [currentIndex, volume, list]);
+
+    // 2) 로그인 상태라면 Firestore에도 저장
+    if (user) {
+      saveUserPlaylist(user.uid, userTracks).catch((e) => {
+        console.error('플레이리스트 저장 실패:', e);
+      });
+    }
+  }, [currentIndex, volume, list, user]);
+
 
   /* ---------- Controls ---------- */
   const togglePlay = () => {
@@ -285,24 +337,48 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     }
   };
 
-  /* ---------- Upload ---------- */
-  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
+    /* ---------- Upload ---------- */
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
     e.currentTarget.value = '';
-    if (!f) return;
+    if (!file) return;
 
+    // 업로드 중 에러가 나더라도 앱이 죽지 않도록 try/catch
     try {
-      const url = URL.createObjectURL(f);
-      const t: Track = { title: f.name, artist: 'Local', src: url };
+      let src: string;
+      let artist = 'Local';
+
+      if (user) {
+        // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
+        const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
+        const fileRef = ref(storage, path);
+
+        // 2) 파일을 Firebase Storage에 업로드
+        const snap = await uploadBytes(fileRef, file);
+
+        // 3) 다운로드 가능한 HTTPS URL 가져오기
+        src = await getDownloadURL(snap.ref);
+
+        // 4) 아티스트 표시는 로그인한 사용자 정보로
+        artist = user.displayName ?? user.email ?? 'Me';
+      } else {
+        // 로그인 안 된 상태에서는 예전처럼 blob URL로만 사용
+        src = URL.createObjectURL(file);
+      }
+
+      const t: Track = { title: file.name, artist, src };
 
       const wasEmpty = list.length === 0;
       setList((prev) => [...prev, t]);
 
       if (wasEmpty) {
-        setCurrentIndex(0);   // 첫 추가는 선택만
-        setIsPlaying(false);  // 자동재생 방지
+        setCurrentIndex(0);
+        setIsPlaying(true);
       }
-    } catch {}
+    } catch (err) {
+      console.error('업로드 중 오류:', err);
+      alert('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+    }
   };
 
   const canDelete = (i: number) => i >= baseLenRef.current;
