@@ -101,6 +101,7 @@ type RepeatMode = 'off' | 'one' | 'all';
 export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { user } = useAuth();  // ← 추가
+  const [uploading, setUploading] = useState(false); // 🔽 업로드 상태
 
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
