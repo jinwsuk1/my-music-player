@@ -1,0 +1,17 @@
+// Import the functions you need from the SDKs you need
+import { initializeApp } from "firebase/app";
+// TODO: Add SDKs for Firebase products that you want to use
+// https://firebase.google.com/docs/web/setup#available-libraries
+
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyC-9bhbeugzykYzffQ4E2GY03k2phR6NK8",
+  authDomain: "my-music-player-7359d.firebaseapp.com",
+  projectId: "my-music-player-7359d",
+  storageBucket: "my-music-player-7359d.firebasestorage.app",
+  messagingSenderId: "234314426224",
+  appId: "1:234314426224:web:a8f335870332b2698651b5"
+};
+
+// Initialize Firebase
+const app = initializeApp(firebaseConfig);

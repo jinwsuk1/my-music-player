@@ -1,5 +1,6 @@
 import Player from '@/components/Player';
 import { tracks } from '@/data/tracks';
+import LoginPanel from '@/auth/LoginPanel';
 
 export default function App() {
   return (
@@ -9,6 +10,9 @@ export default function App() {
           <span className="text-violet-400">🎵</span>
           <span>My Music Player</span>
         </h1>
+
+        {/* 로그인 패널 */}
+        <LoginPanel />
 
         <div className="rounded-2xl border border-neutral-800 bg-neutral-850/60 p-5 md:p-6 shadow-2xl backdrop-blur-sm">
           <Player tracks={tracks} />
@@ -21,3 +25,4 @@ export default function App() {
     </div>
   );
 }
+
