@@ -339,48 +339,51 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   };
 
     /* ---------- Upload ---------- */
-  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.currentTarget.value = '';
-    if (!file) return;
+const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  e.currentTarget.value = '';
+  if (!file) return;
 
-    // 업로드 중 에러가 나더라도 앱이 죽지 않도록 try/catch
-    try {
-      let src: string;
-      let artist = 'Local';
+  try {
+    setUploading(true);
 
-      if (user) {
-        // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
-        const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
-        const fileRef = ref(storage, path);
+    let src: string;
+    let artist = 'Local';
 
-        // 2) 파일을 Firebase Storage에 업로드
-        const snap = await uploadBytes(fileRef, file);
+    if (user) {
+      // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
+      const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
+      const fileRef = ref(storage, path);
 
-        // 3) 다운로드 가능한 HTTPS URL 가져오기
-        src = await getDownloadURL(snap.ref);
+      // 2) Firebase Storage 업로드
+      const snap = await uploadBytes(fileRef, file);
 
-        // 4) 아티스트 표시는 로그인한 사용자 정보로
-        artist = user.displayName ?? user.email ?? 'Me';
-      } else {
-        // 로그인 안 된 상태에서는 예전처럼 blob URL로만 사용
-        src = URL.createObjectURL(file);
-      }
+      // 3) 다운로드 URL (항상 같은 값)
+      src = await getDownloadURL(snap.ref);
 
-      const t: Track = { title: file.name, artist, src };
-
-      const wasEmpty = list.length === 0;
-      setList((prev) => [...prev, t]);
-
-      if (wasEmpty) {
-        setCurrentIndex(0);
-        setIsPlaying(true);
-      }
-    } catch (err) {
-      console.error('업로드 중 오류:', err);
-      alert('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+      // 4) Firestore에 보이는 artist 값
+      artist = user.displayName ?? user.email ?? 'Me';
+    } else {
+      // 로그인 안 한 경우에는 예전처럼 blob만 사용
+      src = URL.createObjectURL(file);
     }
-  };
+
+    const t: Track = { title: file.name, artist, src };
+
+    const wasEmpty = list.length === 0;
+    setList((prev) => [...prev, t]);
+
+    if (wasEmpty) {
+      setCurrentIndex(0);
+      setIsPlaying(true);
+    }
+  } catch (err) {
+    console.error('업로드 중 오류:', err);
+    alert('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+  } finally {
+    setUploading(false);
+  }
+};
 
   const canDelete = (i: number) => i >= baseLenRef.current;
   const removeAt = (i: number) => {
@@ -539,8 +542,24 @@ export default function Player({ tracks }: { tracks: Track[] }) {
           </div>
 
           {/* Audio first, then Spectrum */}
-          <audio key={track?.src || 'empty'} ref={audioRef} src={track?.src} preload="metadata" />
-          {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
+          {/* // --- 수정 후 --- */}
+          <audio
+            key={track?.src || 'empty'}
+            ref={audioRef}
+            src={track?.src}
+            preload="metadata"
+            onError={(e) => {
+              const el = e.currentTarget;
+              console.error('Audio error:', el.error, 'src=', el.src);
+            }}
+          />
+{track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
+{/* 디버그용: 브라우저 기본 컨트롤로 같은 src 재생해보기 */}
+{track?.src && (
+  <audio controls src={track.src} style={{ width: '100%', marginTop: 8 }} />
+)}
+
+
 
           {/* Seek bar */}
           <div className="space-y-2">
