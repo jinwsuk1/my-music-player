@@ -670,24 +670,22 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   );
 
   /* ---------- UI ---------- */
-  return (
+    return (
     <div className="space-y-5">
-      {isEmpty ? (
-        <div className="space-y-4">
-          <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
-          {uploadControls}
-        </div>
-      ) : (
+      {/* ====== 상단 플레이어 영역 (트랙이 있을 때만) ====== */}
+      {!isEmpty && (
         <>
           {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div>
-              <h2 className="m-0 text-xl md:text-2xl font-semibold">{track?.title ?? 'No track'}</h2>
+              <h2 className="m-0 text-xl md:text-2xl font-semibold">
+                {track?.title ?? 'No track'}
+              </h2>
               <p className="mt-1 text-sm text-neutral-400">{track?.artist ?? ''}</p>
             </div>
           </div>
 
-          {/* Audio first, then Spectrum */}
+          {/* Audio & Spectrum */}
           <audio
             key={track?.src || 'empty'}
             ref={audioRef}
@@ -744,10 +742,14 @@ export default function Player({ tracks }: { tracks: Track[] }) {
               <NextIcon />
             </button>
 
-            {/* Right side icons */}
+            {/* 오른쪽 끝 아이콘들 */}
             <div className="ml-auto flex items-center gap-2">
               {/* Volume */}
-              <div className="relative" onMouseEnter={openVol} onMouseLeave={closeVolDelayed}>
+              <div
+                className="relative"
+                onMouseEnter={openVol}
+                onMouseLeave={closeVolDelayed}
+              >
                 <button
                   onClick={() => setVolOpen((v) => !v)}
                   className="p-2 rounded-full border bg-neutral-800 transition border-neutral-700 hover:bg-neutral-750"
@@ -796,7 +798,9 @@ export default function Player({ tracks }: { tracks: Track[] }) {
 
               {/* Repeat */}
               <button
-                onClick={() => setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'))}
+                onClick={() =>
+                  setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'))
+                }
                 className={cx(
                   'relative p-2 rounded-full border transition',
                   repeat !== 'off'
@@ -815,112 +819,121 @@ export default function Player({ tracks }: { tracks: Track[] }) {
               </button>
             </div>
           </div>
-
-          {/* Upload */}
-          {uploadControls}
-
-          {/* Playlist (drag anywhere on tile) */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between gap-2 mb-1">
-              <div className="flex flex-col">
-                <h3 className="text-sm font-semibold text-neutral-300">
-                  Playlist{user && activePlaylistName ? ` · ${activePlaylistName}` : ''}
-                </h3>
-                {user && (
-                  <p className="mt-0.5 text-[11px] text-neutral-500">
-                    버튼으로 여러 개의 재생목록을 만들고 전환할 수 있어요.
-                  </p>
-                )}
-              </div>
-
-              {user && (
-                <button
-                  type="button"
-                  onClick={handleCreatePlaylist}
-                  className="px-3 py-1 rounded-full text-xs border border-dashed border-neutral-700 text-neutral-300 hover:border-violet-400 hover:text-violet-100"
-                >
-                  + 새 재생목록
-                </button>
-              )}
-            </div>
-
-            {user && userPlaylists.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-2">
-                {userPlaylists.map((pl) => (
-                  <button
-                    key={pl.id}
-                    type="button"
-                    onClick={() => handleSelectPlaylist(pl.id)}
-                    className={cx(
-                      'px-3 py-1 rounded-full text-xs border transition',
-                      pl.id === activePlaylistId
-                        ? 'bg-violet-600/20 border-violet-500 text-violet-100'
-                        : 'bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500',
-                    )}
-                  >
-                    {pl.name}
-                  </button>
-                ))}
-              </div>
-            )}
-
-            <ul className="space-y-2">
-              {list.map((t, i) => {
-                const active = i === currentIndex;
-                const draggingThis = isDragging && i === dragFrom;
-                const isOver = isDragging && i === dragOver;
-
-                return (
-                  <li
-                    key={`${t.title}-${i}`}
-                    ref={(el) => {
-                      itemRefs.current[i] = el;
-                    }}
-                    className={cx(
-                      'flex items-center gap-2 rounded-xl border transition select-none',
-                      active
-                        ? 'bg-neutral-800/80 border-neutral-700'
-                        : 'bg-neutral-900/30 border-neutral-800 hover:bg-neutral-800/40 hover:border-neutral-700',
-                      draggingThis ? 'opacity-50' : '',
-                      isOver ? 'ring-2 ring-violet-500/50' : '',
-                    )}
-                    draggable
-                    onDragStart={(e) => onDragStart(i, e)}
-                    onDragOver={(e) => onDragOverItem(i, e)}
-                    onDrop={(e) => onDropItem(i, e)}
-                    onDragEnd={onDragEnd}
-                  >
-                    {/* 시각적 핸들(힌트용) */}
-                    <div className="px-2 cursor-grab text-neutral-500" title="Drag to reorder">
-                      ⋮⋮
-                    </div>
-
-                    {/* 본문 클릭으로 재생/일시정지 (드래그 직후 클릭 억제) */}
-                    <button
-                      onClick={() => select(i)}
-                      className="flex-1 text-left px-2 py-2 rounded-lg transition"
-                    >
-                      <div className="font-medium truncate">{t.title}</div>
-                      <div className="text-xs text-neutral-400 truncate">{t.artist}</div>
-                    </button>
-
-                    {/* 삭제(업로드 항목만) */}
-                    {canDelete(i) && (
-                      <button
-                        onClick={() => removeAt(i)}
-                        className="px-2.5 py-2 rounded-lg bg-neutral-800 border border-neutral-700 hover:bg-neutral-750 text-xs transition"
-                        title="Remove uploaded track"
-                      >
-                        삭제
-                      </button>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
         </>
       )}
+
+      {/* ====== 트랙이 전혀 없을 때 안내문 ====== */}
+      {isEmpty && (
+        <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
+      )}
+
+      {/* 업로드 버튼은 항상 노출 */}
+      {uploadControls}
+
+      {/* ====== Playlist 영역 (항상 표시) ====== */}
+      <div className="space-y-2">
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex flex-col">
+            <h3 className="text-sm font-semibold text-neutral-300">
+              Playlist
+              {user && activePlaylistName ? ` · ${activePlaylistName}` : ''}
+            </h3>
+            {user && (
+              <p className="mt-0.5 text-[11px] text-neutral-500">
+                버튼으로 여러 개의 재생목록을 만들고 전환할 수 있어요.
+              </p>
+            )}
+          </div>
+
+          {user && (
+            <button
+              type="button"
+              onClick={handleCreatePlaylist}
+              className="px-3 py-1 rounded-full text-xs border border-dashed border-neutral-700 text-neutral-300 hover:border-violet-400 hover:text-violet-100"
+            >
+              + 새 재생목록
+            </button>
+          )}
+        </div>
+
+        {user && userPlaylists.length > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {userPlaylists.map((pl) => (
+              <button
+                key={pl.id}
+                type="button"
+                onClick={() => handleSelectPlaylist(pl.id)}
+                className={cx(
+                  'px-3 py-1 rounded-full text-xs border transition',
+                  pl.id === activePlaylistId
+                    ? 'bg-violet-600/20 border-violet-500 text-violet-100'
+                    : 'bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500',
+                )}
+              >
+                {pl.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* 실제 트랙 리스트 (없으면 그냥 빈 목록) */}
+        <ul className="space-y-2">
+          {list.map((t, i) => {
+            const active = i === currentIndex;
+            const draggingThis = isDragging && i === dragFrom;
+            const isOver = isDragging && i === dragOver;
+
+            return (
+              <li
+                key={`${t.title}-${i}`}
+                ref={(el) => {
+                  itemRefs.current[i] = el;
+                }}
+                className={cx(
+                  'flex items-center gap-2 rounded-xl border transition select-none',
+                  active
+                    ? 'bg-neutral-800/80 border-neutral-700'
+                    : 'bg-neutral-900/30 border-neutral-800 hover:bg-neutral-800/40 hover:border-neutral-700',
+                  draggingThis ? 'opacity-50' : '',
+                  isOver ? 'ring-2 ring-violet-500/50' : '',
+                )}
+                draggable
+                onDragStart={(e) => onDragStart(i, e)}
+                onDragOver={(e) => onDragOverItem(i, e)}
+                onDrop={(e) => onDropItem(i, e)}
+                onDragEnd={onDragEnd}
+              >
+                <div
+                  className="px-2 cursor-grab text-neutral-500"
+                  title="Drag to reorder"
+                >
+                  ⋮⋮
+                </div>
+
+                <button
+                  onClick={() => select(i)}
+                  className="flex-1 text-left px-2 py-2 rounded-lg transition"
+                >
+                  <div className="font-medium truncate">{t.title}</div>
+                  <div className="text-xs text-neutral-400 truncate">
+                    {t.artist}
+                  </div>
+                </button>
+
+                {canDelete(i) && (
+                  <button
+                    onClick={() => removeAt(i)}
+                    className="px-2.5 py-2 rounded-lg bg-neutral-800 border border-neutral-700 hover:bg-neutral-750 text-xs transition"
+                    title="Remove uploaded track"
+                  >
+                    삭제
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      </div>
     </div>
   );
 }
