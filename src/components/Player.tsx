@@ -216,7 +216,11 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     
   // 로그인한 사용자의 Firestore 플레이리스트 실시간 동기화
 useEffect(() => {
-  if (!user) return;
+  // user가 바뀔 때마다 "아직 서버에서 안 읽음" 상태로 초기화
+  if (!user) {
+    hasLoadedRemoteRef.current = false;
+    return;
+  }
 
   const uid = user.uid;
   let handledInitial = false; // 이 유저에 대한 "첫 스냅샷"인지 표시
@@ -231,7 +235,6 @@ useEffect(() => {
     // 1) 로그인 직후 첫 스냅샷 + 게스트에서 추가한 곡이 있는 경우
     if (isInitial && guestTracksRef.current.length > 0) {
       const guestTracks = [...guestTracksRef.current];
-      // 한 번 처리 후에는 다시 쓰지 않도록 비워둔다
       guestTracksRef.current = [];
 
       const hasRemote = serverTracks.length > 0;
@@ -253,8 +256,6 @@ useEffect(() => {
             const imported: Track[] = [];
 
             for (const t of guestTracks) {
-              // 이론상 게스트 트랙은 거의 blob: URL 이지만
-              // 혹시 http(s)/gs:// 같은 경우는 그대로 사용
               const isRemoteUrl =
                 t.src.startsWith('http://') ||
                 t.src.startsWith('https://') ||
@@ -266,7 +267,6 @@ useEffect(() => {
               }
 
               try {
-                // blob URL에서 실제 파일 blob 가져와서 Storage에 업로드
                 const res = await fetch(t.src);
                 const blob = await res.blob();
 
@@ -286,21 +286,18 @@ useEffect(() => {
               }
             }
 
-            // 원래 서버에 있던 곡이 있으면 뒤에 이어붙이고,
-            // 없으면 imported 만 사용
             finalTracks = hasRemote ? [...serverTracks, ...imported] : imported;
           } else {
-            // "아니오"를 선택한 경우 → 서버 목록만 사용
             finalTracks = serverTracks;
           }
 
-          // Firestore에 최종 플레이리스트 저장
           await saveUserPlaylist(uid, finalTracks);
 
-          // "서버에서 온 변경"이므로 다음 persist 에서 다시 저장하지 않도록 플래그 설정
+          // 서버에서 온 변경이라는 표시
           remoteUpdateRef.current = true;
+          // "이제 서버 상태를 한 번 읽었다" 표시
+          hasLoadedRemoteRef.current = true;
 
-          // UI에도 반영
           setList(() => {
             const base = tracks.slice(0, baseLenRef.current);
             return [...base, ...finalTracks];
@@ -311,17 +308,21 @@ useEffect(() => {
         }
       })();
 
-      return; // 여기서 끝. 아래 일반 스냅샷 처리는 타지 않는다.
+      return;
     }
 
     // 2) 그 외 일반적인 스냅샷 처리 (실시간 동기화)
     if (remoteTracks === null) {
-      // 서버에 아직 문서가 없고, 게스트 곡도 없는 경우 → 아무것도 안 함
+      // 서버에 아직 문서가 없고, 게스트 곡도 없는 경우
+      if (isInitial) {
+        hasLoadedRemoteRef.current = true; // "빈 서버 상태"를 한 번 확인했다는 의미
+      }
       return;
     }
 
     // 서버에서 온 변경 → localStorage/Firestore 재저장 막기용 플래그
     remoteUpdateRef.current = true;
+    hasLoadedRemoteRef.current = true; // 서버 목록을 한 번이라도 읽었음
 
     setList(() => {
       const base = tracks.slice(0, baseLenRef.current);
@@ -338,25 +339,30 @@ useEffect(() => {
 }, [user, tracks]);
 
    // persist (localStorage + Firestore 동기화)
-  useEffect(() => {
-    const userTracks = list.slice(baseLenRef.current);
+useEffect(() => {
+  const userTracks = list.slice(baseLenRef.current);
 
-    // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
-    saveState({ index: currentIndex, volume, userTracks });
+  // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
+  saveState({ index: currentIndex, volume, userTracks });
 
-    // 2) 로그인 상태라면 Firestore에도 저장
-    if (!user) return;
+  // 2) 로그인 상태가 아니면 서버에는 저장하지 않음
+  if (!user) return;
 
-    // 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
-    if (remoteUpdateRef.current) {
-      remoteUpdateRef.current = false;
-      return;
-    }
+  // 3) 이 유저에 대해 아직 서버 플레이리스트를 한 번도 읽어오지 못했다면
+  //    (로그인 직후) 서버 데이터를 로컬 상태로 덮어쓰지 않도록, 쓰기를 막는다.
+  if (!hasLoadedRemoteRef.current) return;
 
-    saveUserPlaylist(user.uid, userTracks).catch((e) => {
-      console.error('플레이리스트 저장 실패:', e);
-    });
-  }, [currentIndex, volume, list, user]);
+  // 4) 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
+  if (remoteUpdateRef.current) {
+    remoteUpdateRef.current = false;
+    return;
+  }
+
+  // 5) 진짜로 사용자가 조작한 변경만 Firestore에 반영
+  saveUserPlaylist(user.uid, userTracks).catch((e) => {
+    console.error('플레이리스트 저장 실패:', e);
+  });
+}, [currentIndex, volume, list, user]);
 
 
   /* ---------- Controls ---------- */
