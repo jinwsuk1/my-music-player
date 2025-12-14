@@ -7,7 +7,14 @@ import type React from 'react';
 import Spectrum from './Spectrum';
 import type { Track } from '../data/tracks';
 import { fmt } from '../utils/time';
-import { listenUserPlaylist, saveUserPlaylist } from '@/api/playlist';
+import {
+  listenUserPlaylist,
+  saveUserPlaylist,
+  listenUserPlaylists,
+  saveUserPlaylists,
+  createEmptyPlaylist,
+  type UserPlaylist,
+} from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
 const cx = (...a: Array<string | false | null | undefined>) =>
@@ -71,7 +78,10 @@ const ShuffleIcon = (p: React.SVGProps<SVGSVGElement>) => (
 );
 const RepeatIcon = (p: React.SVGProps<SVGSVGElement>) => (
   <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
-    <path d="M7 7h9V5l4 3.5L16 12v-2H7a3 3 0 0 0-3 3v1H2v-1a5 5 0 0 1 5-5zm10 10H8v2l-4-3.5L8 12v2h9a3 3 0 0 1 3 3v1h2v-1a5 5 0 0 0-5-5z" fill="currentColor" />
+    <path
+      d="M7 7h9V5l4 3.5L16 12v-2H7a3 3 0 0 0-3 3v1H2v-1a5 5 0 0 1 5-5zm10 10H8v2l-4-3.5L8 12v2h9a3 3 0 0 1 3 3v1h2v-1a5 5 0 0 0-5-5z"
+      fill="currentColor"
+    />
   </svg>
 );
 
@@ -101,21 +111,18 @@ type RepeatMode = 'off' | 'one' | 'all';
 
 export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const { user } = useAuth();  // ← 추가
-  const [uploading, setUploading] = useState(false); // 🔽 업로드 상태
+  const { user } = useAuth();
+  const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // 여러 개 플레이리스트
+  const [userPlaylists, setUserPlaylists] = useState<UserPlaylist[]>([]);
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+
   const baseLenRef = useRef<number>(tracks.length);
-  // 서버 플레이리스트를 최소 한 번은 불러왔는지 여부
-  const hasLoadedRemoteRef = useRef<boolean>(false);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
-  // 🔽 추가: 서버 플레이리스트를 한 번이라도 정상적으로 읽었는지 표시
-  const readyToSyncRef = useRef(false);
-  const remoteUpdateRef = useRef(false);  // Firestore에서 온 변경인지 표시
-
-  // 게스트(비로그인) 상태에서 추가한 트랙들을 따로 기억해 두는 용도
-  const guestTracksRef = useRef<Track[]>([]);
+  const remoteUpdateRef = useRef(false); // Firestore에서 온 변경인지 표시
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -152,6 +159,11 @@ export default function Player({ tracks }: { tracks: Track[] }) {
 
   const track = list[currentIndex];
   const isEmpty = list.length === 0;
+
+  const activePlaylistName =
+    user && activePlaylistId
+      ? userPlaylists.find((p) => p.id === activePlaylistId)?.name
+      : undefined;
 
   /* ---------- Audio events ---------- */
   useEffect(() => {
@@ -213,157 +225,86 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     if (audioRef.current) audioRef.current.volume = vol;
   }, []);
 
-    
-  // 로그인한 사용자의 Firestore 플레이리스트 실시간 동기화
-useEffect(() => {
-  // user가 바뀔 때마다 "아직 서버에서 안 읽음" 상태로 초기화
-  if (!user) {
-    hasLoadedRemoteRef.current = false;
-    return;
-  }
+  // 전체 플레이리스트 목록 + activePlaylistId 실시간 구독 (UI용)
+  useEffect(() => {
+    if (!user) {
+      setUserPlaylists([]);
+      setActivePlaylistId(null);
+      return;
+    }
 
-  const uid = user.uid;
-  let handledInitial = false; // 이 유저에 대한 "첫 스냅샷"인지 표시
+    const uid = user.uid;
 
-  const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
-    const isInitial = !handledInitial;
-    handledInitial = true;
+    const unsubscribe = listenUserPlaylists(uid, ({ playlists, activePlaylistId }) => {
+      setUserPlaylists(playlists);
 
-    // remoteTracks === null 이면 이 유저에 대한 문서가 아직 없는 상태
-    const serverTracks = remoteTracks ?? [];
-
-    // 1) 로그인 직후 첫 스냅샷 + 게스트에서 추가한 곡이 있는 경우
-    if (isInitial && guestTracksRef.current.length > 0) {
-      const guestTracks = [...guestTracksRef.current];
-      guestTracksRef.current = [];
-
-      const hasRemote = serverTracks.length > 0;
-
-      const msg = hasRemote
-        ? '현재 이 브라우저에서 추가한 곡들이 있습니다.\n' +
-          '이 곡들을 계정 플레이리스트에 추가할까요?\n\n' +
-          '확인: 추가 / 취소: 계정 목록만 사용'
-        : '현재 이 브라우저에서 추가한 곡들이 있습니다.\n' +
-          '이 곡들을 이 계정의 첫 플레이리스트로 저장할까요?';
-
-      const useLocal = window.confirm(msg);
-
-      (async () => {
-        try {
-          let finalTracks: Track[] = serverTracks;
-
-          if (useLocal) {
-            const imported: Track[] = [];
-
-            for (const t of guestTracks) {
-              const isRemoteUrl =
-                t.src.startsWith('http://') ||
-                t.src.startsWith('https://') ||
-                t.src.startsWith('gs://');
-
-              if (isRemoteUrl) {
-                imported.push(t);
-                continue;
-              }
-
-              try {
-                const res = await fetch(t.src);
-                const blob = await res.blob();
-
-                const safeTitle =
-                  (t.title ?? 'track').replace(/[^a-zA-Z0-9가-힣_.-]/g, '_') || 'track';
-                const fileName = `${Date.now()}-${Math.random()
-                  .toString(36)
-                  .slice(2, 8)}-${safeTitle}.mp3`;
-
-                const fileRef = ref(storage, `tracks/${uid}/${fileName}`);
-                await uploadBytes(fileRef, blob);
-                const url = await getDownloadURL(fileRef);
-
-                imported.push({ ...t, src: url });
-              } catch (err) {
-                console.error('게스트 트랙 업로드 실패:', err);
-              }
-            }
-
-            finalTracks = hasRemote ? [...serverTracks, ...imported] : imported;
-          } else {
-            finalTracks = serverTracks;
-          }
-
-          await saveUserPlaylist(uid, finalTracks);
-
-          // 서버에서 온 변경이라는 표시
-          remoteUpdateRef.current = true;
-          // "이제 서버 상태를 한 번 읽었다" 표시
-          hasLoadedRemoteRef.current = true;
-
-          setList(() => {
-            const base = tracks.slice(0, baseLenRef.current);
-            return [...base, ...finalTracks];
-          });
-          setCurrentIndex(0);
-        } catch (err) {
-          console.error('로그인 시 게스트 트랙 병합 실패:', err);
+      setActivePlaylistId((prev) => {
+        if (prev && playlists.some((p) => p.id === prev)) {
+          return prev;
         }
-      })();
-
-      return;
-    }
-
-    // 2) 그 외 일반적인 스냅샷 처리 (실시간 동기화)
-    if (remoteTracks === null) {
-      // 서버에 아직 문서가 없고, 게스트 곡도 없는 경우
-      if (isInitial) {
-        hasLoadedRemoteRef.current = true; // "빈 서버 상태"를 한 번 확인했다는 의미
-      }
-      return;
-    }
-
-    // 서버에서 온 변경 → localStorage/Firestore 재저장 막기용 플래그
-    remoteUpdateRef.current = true;
-    hasLoadedRemoteRef.current = true; // 서버 목록을 한 번이라도 읽었음
-
-    setList(() => {
-      const base = tracks.slice(0, baseLenRef.current);
-      return [...base, ...remoteTracks];
+        if (activePlaylistId && playlists.some((p) => p.id === activePlaylistId)) {
+          return activePlaylistId;
+        }
+        return playlists[0]?.id ?? null;
+      });
     });
 
-    setCurrentIndex(0);
-  });
+    return () => {
+      unsubscribe();
+    };
+  }, [user]);
 
-  // 컴포넌트 언마운트 / user 변경 시 구독 해제
-  return () => {
-    unsubscribe();
-  };
-}, [user, tracks]);
+  // 로그인한 사용자의 Firestore 플레이리스트 (현재 active 하나만) 불러오기
+  useEffect(() => {
+    if (!user) return;
 
-   // persist (localStorage + Firestore 동기화)
-useEffect(() => {
-  const userTracks = list.slice(baseLenRef.current);
+    const uid = user.uid;
 
-  // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
-  saveState({ index: currentIndex, volume, userTracks });
+    const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
+      // 아직 이 유저 문서가 없으면 (remoteTracks === null) → 그냥 무시
+      // => 지금 화면에 떠 있는 로컬 리스트 그대로 사용
+      if (remoteTracks === null) return;
 
-  // 2) 로그인 상태가 아니면 서버에는 저장하지 않음
-  if (!user) return;
+      // 여기서부터는 "서버에서 온 변경"이므로,
+      // 다음 useEffect에서 다시 서버로 저장하지 않도록 플래그를 세팅
+      remoteUpdateRef.current = true;
 
-  // 3) 이 유저에 대해 아직 서버 플레이리스트를 한 번도 읽어오지 못했다면
-  //    (로그인 직후) 서버 데이터를 로컬 상태로 덮어쓰지 않도록, 쓰기를 막는다.
-  if (!hasLoadedRemoteRef.current) return;
+      setList(() => {
+        const base = tracks.slice(0, baseLenRef.current); // 샘플 곡
+        const userTracks = remoteTracks; // 서버에 저장된 곡들
+        return [...base, ...userTracks];
+      });
 
-  // 4) 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
-  if (remoteUpdateRef.current) {
-    remoteUpdateRef.current = false;
-    return;
-  }
+      // 서버 기준으로는 첫 곡부터 재생
+      setCurrentIndex(0);
+    });
 
-  // 5) 진짜로 사용자가 조작한 변경만 Firestore에 반영
-  saveUserPlaylist(user.uid, userTracks).catch((e) => {
-    console.error('플레이리스트 저장 실패:', e);
-  });
-}, [currentIndex, volume, list, user]);
+    // 컴포넌트 언마운트 / user 변경 시 구독 해제
+    return () => {
+      unsubscribe();
+    };
+  }, [user, tracks]);
 
+  // persist (localStorage + Firestore 동기화)
+  useEffect(() => {
+    const userTracks = list.slice(baseLenRef.current);
+
+    // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
+    saveState({ index: currentIndex, volume, userTracks });
+
+    // 2) 로그인 상태라면 Firestore에도 저장
+    if (!user) return;
+
+    // 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
+    if (remoteUpdateRef.current) {
+      remoteUpdateRef.current = false;
+      return;
+    }
+
+    saveUserPlaylist(user.uid, userTracks).catch((e) => {
+      console.error('플레이리스트 저장 실패:', e);
+    });
+  }, [currentIndex, volume, list, user]);
 
   /* ---------- Controls ---------- */
   const togglePlay = () => {
@@ -448,104 +389,99 @@ useEffect(() => {
     }
   };
 
-    /* ---------- Upload ---------- */
-const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-  const file = e.target.files?.[0];
-  e.currentTarget.value = '';
-  if (!file) return;
+  /* ---------- Upload ---------- */
+  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.currentTarget.value = '';
+    if (!file) return;
 
-  setUploadError(null);
-  setUploading(true);
-
-  try {
+    setUploadError(null);
     setUploading(true);
 
-    let src: string;
-    let artist = 'Local';
+    try {
+      setUploading(true);
 
-    if (user) {
-      // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
-      const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
-      const fileRef = ref(storage, path);
+      let src: string;
+      let artist = 'Local';
 
-      // 2) Firebase Storage 업로드
-      const snap = await uploadBytes(fileRef, file);
+      if (user) {
+        // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
+        const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
+        const fileRef = ref(storage, path);
 
-      // 3) 다운로드 URL (항상 같은 값)
-      src = await getDownloadURL(snap.ref);
+        // 2) Firebase Storage 업로드
+        const snap = await uploadBytes(fileRef, file);
 
-      // 4) Firestore에 보이는 artist 값
-      artist = user.displayName ?? user.email ?? 'Me';
-    } else {
-      // 로그인 안 한 경우에는 예전처럼 blob만 사용
-      src = URL.createObjectURL(file);
+        // 3) 다운로드 URL (항상 같은 값)
+        src = await getDownloadURL(snap.ref);
+
+        // 4) Firestore에 보이는 artist 값
+        artist = user.displayName ?? user.email ?? 'Me';
+      } else {
+        // 로그인 안 한 경우에는 예전처럼 blob만 사용
+        src = URL.createObjectURL(file);
+      }
+
+      const t: Track = { title: file.name, artist, src };
+
+      const wasEmpty = list.length === 0;
+      setList((prev) => [...prev, t]);
+
+      if (wasEmpty) {
+        setCurrentIndex(0);
+        setIsPlaying(true);
+      }
+    } catch (err) {
+      console.error('업로드 중 오류:', err);
+      setUploadError('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+    } finally {
+      setUploading(false);
     }
-
-    const t: Track = { title: file.name, artist, src };
-
-    // 🔹 로그인 안 한 상태에서 추가된 트랙은 따로 저장해 둔다
-    if (!user) {
-      guestTracksRef.current = [...guestTracksRef.current, t];
-    }
-
-    const wasEmpty = list.length === 0;
-    setList((prev) => [...prev, t]);
-
-    if (wasEmpty) {
-      setCurrentIndex(0);
-      setIsPlaying(true);
-    }
-  } catch (err) {
-    console.error('업로드 중 오류:', err);
-    setUploadError('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
-  } finally {
-    setUploading(false);
-  }
-};
+  };
 
   const canDelete = (i: number) => i >= baseLenRef.current;
   const removeAt = (i: number) => {
-  setList((prev) => {
-    const removed = prev[i];
-    const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
+    setList((prev) => {
+      const removed = prev[i];
+      const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
 
-    // 현재 곡 인덱스 보정
-    setCurrentIndex((ci) => {
-      if (i === ci) {
-        if (nextList.length === 0) return 0;
-        return Math.min(ci, nextList.length - 1);
+      // 현재 곡 인덱스 보정
+      setCurrentIndex((ci) => {
+        if (i === ci) {
+          if (nextList.length === 0) return 0;
+          return Math.min(ci, nextList.length - 1);
+        }
+        return i < ci ? ci - 1 : ci;
+      });
+
+      // 지울 곡이 없으면 여기서 끝
+      if (!removed) return nextList;
+
+      // 1) 로컬 blob URL 정리
+      if (removed.src?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(removed.src);
+        } catch {}
       }
-      return i < ci ? ci - 1 : ci;
+
+      // 2) Firebase Storage에 올라간 곡이면 Storage에서도 삭제
+      if (
+        user && // 로그인 상태이고
+        removed.src?.startsWith('https://firebasestorage.googleapis.com/')
+      ) {
+        try {
+          const fileRef = ref(storage, removed.src);
+          deleteObject(fileRef).catch((err) => {
+            console.error('Storage 파일 삭제 실패:', err);
+          });
+        } catch (err) {
+          console.error('Storage 삭제 ref 생성 실패:', err);
+        }
+      }
+
+      return nextList;
     });
-
-    // 지울 곡이 없으면 여기서 끝
-    if (!removed) return nextList;
-
-    // 1) 로컬 blob URL 정리
-    if (removed.src?.startsWith('blob:')) {
-      try {
-        URL.revokeObjectURL(removed.src);
-      } catch {}
-    }
-
-    // 2) Firebase Storage에 올라간 곡이면 Storage에서도 삭제
-    if (
-      user && // 로그인 상태이고
-      removed.src?.startsWith('https://firebasestorage.googleapis.com/')
-    ) {
-      try {
-        const fileRef = ref(storage, removed.src);
-        deleteObject(fileRef).catch((err) => {
-          console.error('Storage 파일 삭제 실패:', err);
-        });
-      } catch (err) {
-        console.error('Storage 삭제 ref 생성 실패:', err);
-      }
-    }
-
-    return nextList;
-  });
-};
+  };
 
   /* ---------- Keyboard shortcuts ---------- */
   useEffect(() => {
@@ -576,7 +512,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
 
   const repeatLabel = useMemo(
     () => (repeat === 'off' ? 'Repeat Off' : repeat === 'all' ? 'Repeat All' : 'Repeat One'),
-    [repeat]
+    [repeat],
   );
 
   /* ---------- Reorder helpers ---------- */
@@ -658,13 +594,54 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     // 클릭 억제 플래그는 select()에서 처리
   };
 
-    const uploadControls = (
+  /* ---------- Playlist 관리 (여러 개) ---------- */
+  const handleCreatePlaylist = () => {
+    if (!user) {
+      alert('여러 개의 재생목록은 로그인 후에 사용할 수 있어요.');
+      return;
+    }
+    const name = window.prompt('새 재생목록 이름을 입력하세요', '새 재생목록');
+    if (!name) return;
+    const trimmed = name.trim();
+    if (!trimmed) return;
+
+    const newPlaylist = createEmptyPlaylist(trimmed);
+
+    setUserPlaylists((prev) => {
+      const next = [...prev, newPlaylist];
+      if (user) {
+        saveUserPlaylists(user.uid, next, newPlaylist.id).catch((err) => {
+          console.error('새 재생목록 저장 실패:', err);
+        });
+      }
+      return next;
+    });
+
+    setActivePlaylistId(newPlaylist.id);
+
+    remoteUpdateRef.current = true;
+    setList(tracks.slice(0, baseLenRef.current));
+    setCurrentIndex(0);
+  };
+
+  const handleSelectPlaylist = (playlistId: string) => {
+    if (!user) return;
+    if (playlistId === activePlaylistId) return;
+
+    setActivePlaylistId(playlistId);
+
+    saveUserPlaylists(user.uid, userPlaylists, playlistId).catch((err) => {
+      console.error('재생목록 선택 저장 실패:', err);
+    });
+  };
+
+  const uploadControls = (
     <div className="space-y-1">
       <div className="flex items-center gap-3">
         <label
           className={cx(
             'inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm',
-            uploading && 'opacity-60 cursor-not-allowed'
+            uploading && 'opacity-60 cursor-not-allowed',
           )}
         >
           <input
@@ -692,7 +669,6 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     </div>
   );
 
-
   /* ---------- UI ---------- */
   return (
     <div className="space-y-5">
@@ -702,7 +678,6 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
           {uploadControls}
         </div>
       ) : (
-
         <>
           {/* Header */}
           <div className="flex items-start justify-between gap-3">
@@ -713,7 +688,6 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
           </div>
 
           {/* Audio first, then Spectrum */}
-          {/* // --- 수정 후 --- */}
           <audio
             key={track?.src || 'empty'}
             ref={audioRef}
@@ -726,12 +700,6 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
             }}
           />
           {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
-{/* 디버그용: 브라우저 기본 컨트롤로 같은 src 재생해보기 */}
-{/* {track?.src && (
-  <audio controls src={track.src} style={{ width: '100%', marginTop: 8 }} />
-)} */}
-
-
 
           {/* Seek bar */}
           <div className="space-y-2">
@@ -778,7 +746,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
 
             {/* Right side icons */}
             <div className="ml-auto flex items-center gap-2">
-              {/* Volume (popover left, horizontal slider) */}
+              {/* Volume */}
               <div className="relative" onMouseEnter={openVol} onMouseLeave={closeVolDelayed}>
                 <button
                   onClick={() => setVolOpen((v) => !v)}
@@ -818,7 +786,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
                   'p-2 rounded-full border transition',
                   shuffle
                     ? 'bg-neutral-800 border-violet-600 text-violet-300'
-                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750'
+                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750',
                 )}
                 aria-pressed={shuffle}
                 aria-label="Shuffle"
@@ -826,14 +794,14 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
                 <ShuffleIcon />
               </button>
 
-              {/* Repeat (with one-badge) */}
+              {/* Repeat */}
               <button
                 onClick={() => setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'))}
                 className={cx(
                   'relative p-2 rounded-full border transition',
                   repeat !== 'off'
                     ? 'bg-neutral-800 border-violet-600 text-violet-300'
-                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750'
+                    : 'bg-neutral-800 border-neutral-700 hover:bg-neutral-750',
                 )}
                 aria-label={repeatLabel}
                 title={repeatLabel}
@@ -852,8 +820,50 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
           {uploadControls}
 
           {/* Playlist (drag anywhere on tile) */}
-          <div>
-            <h3 className="text-sm font-semibold text-neutral-300 mb-2">Playlist</h3>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex flex-col">
+                <h3 className="text-sm font-semibold text-neutral-300">
+                  Playlist{user && activePlaylistName ? ` · ${activePlaylistName}` : ''}
+                </h3>
+                {user && (
+                  <p className="mt-0.5 text-[11px] text-neutral-500">
+                    버튼으로 여러 개의 재생목록을 만들고 전환할 수 있어요.
+                  </p>
+                )}
+              </div>
+
+              {user && (
+                <button
+                  type="button"
+                  onClick={handleCreatePlaylist}
+                  className="px-3 py-1 rounded-full text-xs border border-dashed border-neutral-700 text-neutral-300 hover:border-violet-400 hover:text-violet-100"
+                >
+                  + 새 재생목록
+                </button>
+              )}
+            </div>
+
+            {user && userPlaylists.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {userPlaylists.map((pl) => (
+                  <button
+                    key={pl.id}
+                    type="button"
+                    onClick={() => handleSelectPlaylist(pl.id)}
+                    className={cx(
+                      'px-3 py-1 rounded-full text-xs border transition',
+                      pl.id === activePlaylistId
+                        ? 'bg-violet-600/20 border-violet-500 text-violet-100'
+                        : 'bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500',
+                    )}
+                  >
+                    {pl.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
             <ul className="space-y-2">
               {list.map((t, i) => {
                 const active = i === currentIndex;
@@ -863,14 +873,16 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
                 return (
                   <li
                     key={`${t.title}-${i}`}
-                    ref={(el) => {itemRefs.current[i] = el}}
+                    ref={(el) => {
+                      itemRefs.current[i] = el;
+                    }}
                     className={cx(
                       'flex items-center gap-2 rounded-xl border transition select-none',
                       active
                         ? 'bg-neutral-800/80 border-neutral-700'
                         : 'bg-neutral-900/30 border-neutral-800 hover:bg-neutral-800/40 hover:border-neutral-700',
                       draggingThis ? 'opacity-50' : '',
-                      isOver ? 'ring-2 ring-violet-500/50' : ''
+                      isOver ? 'ring-2 ring-violet-500/50' : '',
                     )}
                     draggable
                     onDragStart={(e) => onDragStart(i, e)}
@@ -878,8 +890,10 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
                     onDrop={(e) => onDropItem(i, e)}
                     onDragEnd={onDragEnd}
                   >
-                    {/* 시각적 핸들(이제 클릭은 필요 없지만 힌트로 유지) */}
-                    <div className="px-2 cursor-grab text-neutral-500" title="Drag to reorder">⋮⋮</div>
+                    {/* 시각적 핸들(힌트용) */}
+                    <div className="px-2 cursor-grab text-neutral-500" title="Drag to reorder">
+                      ⋮⋮
+                    </div>
 
                     {/* 본문 클릭으로 재생/일시정지 (드래그 직후 클릭 억제) */}
                     <button
