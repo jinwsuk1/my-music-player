@@ -1,20 +1,19 @@
-import { storage } from '@/firebase';
-import { useAuth } from '@/auth/AuthContext';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
+
+import { storage } from '@/firebase';
+import { useAuth } from '@/auth/AuthContext';
+import {
+  ref,
+  uploadBytes,
+  getDownloadURL,
+  deleteObject,
+} from 'firebase/storage';
+
 import Spectrum from './Spectrum';
 import type { Track } from '../data/tracks';
 import { fmt } from '../utils/time';
-import {
-  listenUserPlaylist,
-  saveUserPlaylist,
-  listenUserPlaylists,
-  saveUserPlaylists,
-  createEmptyPlaylist,
-  type UserPlaylist,
-} from '@/api/playlist';
+import type { UserPlaylist } from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
 const cx = (...a: Array<string | false | null | undefined>) =>
@@ -56,15 +55,24 @@ const VolumeIcon = ({ volume }: { volume: number }) => {
     return (
       <svg viewBox="0 0 24 24" width="20" height="20">
         <path d="M5 10v4h4l5 4V6l-5 4H5z" fill="currentColor" />
-        <path d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z" fill="currentColor" />
+        <path
+          d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z"
+          fill="currentColor"
+        />
       </svg>
     );
   }
   return (
     <svg viewBox="0 0 24 24" width="20" height="20">
       <path d="M5 10v4h4l5 4V6l-5 4H5z" fill="currentColor" />
-      <path d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z" fill="currentColor" />
-      <path d="M19.5 12a5.5 5.5 0 0 0-3.5-5.17v10.34A5.5 5.5 0 0 0 19.5 12z" fill="currentColor" />
+      <path
+        d="M17 12a3 3 0 0 0-2-2.83v5.66A3 3 0 0 0 17 12z"
+        fill="currentColor"
+      />
+      <path
+        d="M19.5 12a5.5 5.5 0 0 0-3.5-5.17v10.34A5.5 5.5 0 0 0 19.5 12z"
+        fill="currentColor"
+      />
     </svg>
   );
 };
@@ -109,20 +117,41 @@ function saveState(state: PersistState) {
 
 type RepeatMode = 'off' | 'one' | 'all';
 
-export default function Player({ tracks }: { tracks: Track[] }) {
+type PlayerProps = {
+  tracks: Track[];
+
+  // App이 내려주는 Firestore 실데이터
+  remotePlaylists?: UserPlaylist[];
+  remoteActivePlaylistId?: string | null;
+  remotePlaylistName?: string;
+  remoteTracks?: Track[];
+
+  // App으로 위임
+  onSelectPlaylist?: (id: string) => void;
+  onCreatePlaylist?: () => void;
+  onRemoteTracksChange?: (nextTracks: Track[]) => void;
+};
+
+export default function Player({
+  tracks,
+  remotePlaylists,
+  remoteActivePlaylistId,
+  remotePlaylistName,
+  remoteTracks,
+  onSelectPlaylist,
+  onCreatePlaylist,
+  onRemoteTracksChange,
+}: PlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { user } = useAuth();
+
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
-
-  // 여러 개 플레이리스트
-  const [userPlaylists, setUserPlaylists] = useState<UserPlaylist[]>([]);
-  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
 
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const remoteUpdateRef = useRef(false); // Firestore에서 온 변경인지 표시
+  const remoteUpdateRef = useRef(false); // App(Firestore snapshot)에서 온 갱신 표시
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -160,10 +189,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const track = list[currentIndex];
   const isEmpty = list.length === 0;
 
-  const activePlaylistName =
-    user && activePlaylistId
-      ? userPlaylists.find((p) => p.id === activePlaylistId)?.name
-      : undefined;
+  const activePlaylistName = user ? remotePlaylistName : undefined;
 
   /* ---------- Audio events ---------- */
   useEffect(() => {
@@ -201,15 +227,17 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentIndex]);
 
-  // ensure element volume follows state (src remount resets to 1.0)
+  // ensure element volume follows state
   useEffect(() => {
     const el = audioRef.current;
     if (!el) return;
     el.volume = volume;
   }, [track?.src, volume]);
 
-  /* ---------- Initial restore ---------- */
+  /* ---------- Initial restore (로그아웃/로컬용) ---------- */
   useEffect(() => {
+    // 로그인 상태면 어차피 App->remoteTracks로 덮어쓰기 때문에,
+    // 초기 로컬 복구는 비로그인(또는 로그인 전)에서만 의미 있음
     const s = loadState();
     if (!s) return;
 
@@ -225,94 +253,67 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     if (audioRef.current) audioRef.current.volume = vol;
   }, []);
 
-  // 전체 플레이리스트 목록 + activePlaylistId 실시간 구독 (UI용)
-  useEffect(() => {
-    if (!user) {
-      setUserPlaylists([]);
-      setActivePlaylistId(null);
-      return;
-    }
-
-    const uid = user.uid;
-
-    const unsubscribe = listenUserPlaylists(uid, ({ playlists, activePlaylistId }) => {
-      setUserPlaylists(playlists);
-
-      setActivePlaylistId((prev) => {
-        if (prev && playlists.some((p) => p.id === prev)) {
-          return prev;
-        }
-        if (activePlaylistId && playlists.some((p) => p.id === activePlaylistId)) {
-          return activePlaylistId;
-        }
-        return playlists[0]?.id ?? null;
-      });
-    });
-
-    return () => {
-      unsubscribe();
-    };
-  }, [user]);
-
-  // 로그인한 사용자의 Firestore 플레이리스트 (현재 active 하나만) 불러오기
+  // ✅ App에서 내려준(=Firestore 실데이터) active playlist tracks로 Player list 동기화
   useEffect(() => {
     if (!user) return;
+    if (!remoteTracks) return;
 
-    const uid = user.uid;
+    remoteUpdateRef.current = true;
 
-    const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
-      // 아직 이 유저 문서가 없으면 (remoteTracks === null) → 그냥 무시
-      // => 지금 화면에 떠 있는 로컬 리스트 그대로 사용
-      if (remoteTracks === null) return;
-
-      // 여기서부터는 "서버에서 온 변경"이므로,
-      // 다음 useEffect에서 다시 서버로 저장하지 않도록 플래그를 세팅
-      remoteUpdateRef.current = true;
-
-      setList(() => {
-        const base = tracks.slice(0, baseLenRef.current); // 샘플 곡
-        const userTracks = remoteTracks; // 서버에 저장된 곡들
-        return [...base, ...userTracks];
-      });
-
-      // 서버 기준으로는 첫 곡부터 재생
-      setCurrentIndex(0);
+    setList(() => {
+      const base = tracks.slice(0, baseLenRef.current);
+      return [...base, ...remoteTracks];
     });
 
-    // 컴포넌트 언마운트 / user 변경 시 구독 해제
-    return () => {
-      unsubscribe();
-    };
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }, [user, remoteTracks, tracks]);
+
+  // 로그아웃하면 로컬(localStorage) 상태로 복귀
+  useEffect(() => {
+    if (user) return;
+    const s = loadState();
+    const base = tracks.slice(0, baseLenRef.current);
+    const userTracks = s?.userTracks ?? [];
+    setList([...base, ...userTracks]);
+    setCurrentIndex(s?.index ?? 0);
+    setIsPlaying(false);
   }, [user, tracks]);
 
-  // persist (localStorage + Firestore 동기화)
+  // persist (localStorage + App(Firestore) 동기화)
   useEffect(() => {
     const userTracks = list.slice(baseLenRef.current);
 
-    // 1) 항상 localStorage에는 저장 (비로그인/오프라인 대비)
+    // 1) 항상 localStorage에는 저장
     saveState({ index: currentIndex, volume, userTracks });
 
-    // 2) 로그인 상태라면 Firestore에도 저장
+    // 2) 로그인 상태라면 App을 통해 Firestore에도 저장
     if (!user) return;
 
-    // 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
+    // App snapshot으로 들어온 갱신이면 되돌려쓰기 금지
     if (remoteUpdateRef.current) {
       remoteUpdateRef.current = false;
       return;
     }
 
-    saveUserPlaylist(user.uid, userTracks).catch((e) => {
-      console.error('플레이리스트 저장 실패:', e);
-    });
-  }, [currentIndex, volume, list, user]);
+    if (!remoteActivePlaylistId) return;
+    onRemoteTracksChange?.(userTracks);
+  }, [
+    currentIndex,
+    volume,
+    list,
+    user,
+    onRemoteTracksChange,
+    remoteActivePlaylistId,
+  ]);
 
   /* ---------- Controls ---------- */
   const togglePlay = () => {
     const el = audioRef.current;
     if (!el) return;
     if (isPlaying) el.pause();
-    else el.play();
-    setIsPlaying(!isPlaying);
+    else el.play().catch(() => setIsPlaying(false));
+    setIsPlaying((v) => !v);
   };
 
   const seek = (sec: number) => {
@@ -367,7 +368,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
 
   // playlist select: toggle if same, otherwise switch
   const select = (i: number) => {
-    // 드래그 직후 클릭 억제
     if (wasDraggingRef.current) {
       wasDraggingRef.current = false;
       return;
@@ -399,26 +399,17 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     setUploading(true);
 
     try {
-      setUploading(true);
-
       let src: string;
       let artist = 'Local';
 
       if (user) {
-        // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
         const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
         const fileRef = ref(storage, path);
 
-        // 2) Firebase Storage 업로드
         const snap = await uploadBytes(fileRef, file);
-
-        // 3) 다운로드 URL (항상 같은 값)
         src = await getDownloadURL(snap.ref);
-
-        // 4) Firestore에 보이는 artist 값
         artist = user.displayName ?? user.email ?? 'Me';
       } else {
-        // 로그인 안 한 경우에는 예전처럼 blob만 사용
         src = URL.createObjectURL(file);
       }
 
@@ -440,6 +431,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   };
 
   const canDelete = (i: number) => i >= baseLenRef.current;
+
   const removeAt = (i: number) => {
     setList((prev) => {
       const removed = prev[i];
@@ -454,28 +446,24 @@ export default function Player({ tracks }: { tracks: Track[] }) {
         return i < ci ? ci - 1 : ci;
       });
 
-      // 지울 곡이 없으면 여기서 끝
       if (!removed) return nextList;
 
-      // 1) 로컬 blob URL 정리
+      // 로컬 blob URL 정리
       if (removed.src?.startsWith('blob:')) {
         try {
           URL.revokeObjectURL(removed.src);
         } catch {}
       }
 
-      // 2) Firebase Storage에 올라간 곡이면 Storage에서도 삭제
-      if (
-        user && // 로그인 상태이고
-        removed.src?.startsWith('https://firebasestorage.googleapis.com/')
-      ) {
+      // Storage 업로드 곡이면 Storage에서도 삭제 (best-effort)
+      if (user && removed.src?.startsWith('https://firebasestorage.googleapis.com/')) {
         try {
           const fileRef = ref(storage, removed.src);
           deleteObject(fileRef).catch((err) => {
             console.error('Storage 파일 삭제 실패:', err);
           });
         } catch (err) {
-          console.error('Storage 삭제 ref 생성 실패:', err);
+          console.error('Storage refFromURL 생성 실패:', err);
         }
       }
 
@@ -511,7 +499,12 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   }, [current, duration, volume, isPlaying]);
 
   const repeatLabel = useMemo(
-    () => (repeat === 'off' ? 'Repeat Off' : repeat === 'all' ? 'Repeat All' : 'Repeat One'),
+    () =>
+      repeat === 'off'
+        ? 'Repeat Off'
+        : repeat === 'all'
+          ? 'Repeat All'
+          : 'Repeat One',
     [repeat],
   );
 
@@ -526,7 +519,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const applyReorder = (from: number, to: number) => {
     if (from === to) return;
     setList((prev) => reorder(prev, from, to));
-    // currentIndex 재계산
     setCurrentIndex((ci) => {
       if (ci === from) return to;
       if (from < ci && to >= ci) return ci - 1;
@@ -544,7 +536,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     const li = itemRefs.current[i];
     if (!li || !e.dataTransfer) return;
 
-    // 드래그 미리보기용 클론 생성
     const rect = li.getBoundingClientRect();
     const clone = li.cloneNode(true) as HTMLElement;
     clone.classList.add('drag-ghost');
@@ -557,7 +548,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     document.body.appendChild(clone);
     ghostRef.current = clone;
 
-    // 커서 상대 오프셋 계산
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
     try {
@@ -567,7 +557,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   };
 
   const onDragOverItem = (i: number, e: React.DragEvent) => {
-    e.preventDefault(); // drop 허용
+    e.preventDefault();
     if (dragOver !== i) setDragOver(i);
   };
 
@@ -576,12 +566,11 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     if (dragFrom !== null) applyReorder(dragFrom, i);
     setDragFrom(null);
     setDragOver(null);
-    // 고스트 제거
+
     if (ghostRef.current) {
       document.body.removeChild(ghostRef.current);
       ghostRef.current = null;
     }
-    // 클릭 억제 플래그는 select()에서 한 번 소비
   };
 
   const onDragEnd = () => {
@@ -591,130 +580,12 @@ export default function Player({ tracks }: { tracks: Track[] }) {
       document.body.removeChild(ghostRef.current);
       ghostRef.current = null;
     }
-    // 클릭 억제 플래그는 select()에서 처리
   };
 
-  /* ---------- Playlist 관리 (여러 개) ---------- */
-  const handleCreatePlaylist = () => {
-    if (!user) {
-      alert('여러 개의 재생목록은 로그인 후에 사용할 수 있어요.');
-      return;
-    }
-    const name = window.prompt('새 재생목록 이름을 입력하세요', '새 재생목록');
-    if (!name) return;
-    const trimmed = name.trim();
-    if (!trimmed) return;
-
-    const newPlaylist = createEmptyPlaylist(trimmed);
-
-    setUserPlaylists((prev) => {
-      const next = [...prev, newPlaylist];
-      if (user) {
-        saveUserPlaylists(user.uid, next, newPlaylist.id).catch((err) => {
-          console.error('새 재생목록 저장 실패:', err);
-        });
-      }
-      return next;
-    });
-
-    setActivePlaylistId(newPlaylist.id);
-
-    remoteUpdateRef.current = true;
-    setList(tracks.slice(0, baseLenRef.current));
-    setCurrentIndex(0);
-  };
-
-  const handleSelectPlaylist = (playlistId: string) => {
-    if (!user) return;
-    if (playlistId === activePlaylistId) return;
-
-    setActivePlaylistId(playlistId);
-
-    saveUserPlaylists(user.uid, userPlaylists, playlistId).catch((err) => {
-      console.error('재생목록 선택 저장 실패:', err);
-    });
-  };
-
-  const handleDeletePlaylist = async (playlistId: string) => {
-  if (!user) {
-    alert('로그인한 상태에서만 재생목록을 삭제할 수 있습니다.');
-    return;
-  }
-
-  // 기본 재생목록 보호
-  if (playlistId === 'default') {
-    alert('기본 재생목록은 삭제할 수 없습니다.');
-    return;
-  }
-
-  // 지우려는 재생목록 찾기
-  const target = userPlaylists.find((p) => p.id === playlistId);
-  if (!target) return;
-
-  const ok = window.confirm(
-    `재생목록 "${target.name}" 을(를) 삭제하시겠습니까?\n` +
-      '이 목록에서만 사용하는 Firebase Storage 파일도 함께 삭제됩니다.',
-  );
-  if (!ok) return;
-
-  // 1️⃣ Storage 에서 지울 후보 URL 모으기
-  const others = userPlaylists.filter((p) => p.id !== playlistId);
-  const toDelete: string[] = [];
-
-  for (const track of target.tracks ?? []) {
-    const src = track.src;
-    // Firebase Storage URL이 아닌 건 건너뜀 (샘플 mp3 등)
-    if (!src || !src.startsWith('https://firebasestorage.googleapis.com/')) continue;
-
-    // 다른 재생목록에서도 쓰는지 확인
-    const usedElsewhere = others.some((pl) =>
-      (pl.tracks ?? []).some((t) => t.src === src),
-    );
-
-    // 이 플레이리스트에서만 쓰는 파일이면 삭제 후보로 추가
-    if (!usedElsewhere) {
-      toDelete.push(src);
-    }
-  }
-
-  // 2️⃣ 메모리/화면 상태에서 재생목록 제거
-  const nextPlaylists = others;
-  setUserPlaylists(nextPlaylists);
-
-  let newActiveId = activePlaylistId;
-
-  // 방금 삭제한 게 현재 선택된 재생목록이면, 다른 걸로 옮기기
-  if (playlistId === activePlaylistId) {
-    const fallback = nextPlaylists[0] ?? null; // 남은 것 중 첫 번째 또는 null
-    newActiveId = fallback?.id ?? null;
-    setActivePlaylistId(newActiveId);
-
-    const nextTracks = fallback?.tracks ?? [];
-    setList([
-      ...tracks.slice(0, baseLenRef.current), // 샘플 곡들
-      ...nextTracks,                          // 새 active 재생목록 곡들
-    ]);
-    setCurrentIndex(0);
-    setIsPlaying(false);
-  }
-
-  // 3️⃣ Firestore 문서 업데이트
-  try {
-    await saveUserPlaylists(user.uid, nextPlaylists, newActiveId ?? null);
-  } catch (err) {
-    console.error('플레이리스트 삭제 중 Firestore 오류:', err);
-  }
-
-  // 4️⃣ Firebase Storage 파일 실제 삭제
-  for (const url of toDelete) {
-    try {
-      const fileRef = ref(storage, url); // 전체 URL로 ref 생성 가능
-      await deleteObject(fileRef);
-    } catch (err) {
-      console.error('Storage 파일 삭제 실패:', err);
-    }
-  }
-};
+  /* ---------- Playlist (App에 위임) ---------- */
+  const handleCreatePlaylist = () => onCreatePlaylist?.();
+  const handleSelectPlaylist = (playlistId: string) =>
+    onSelectPlaylist?.(playlistId);
 
   const uploadControls = (
     <div className="space-y-1">
@@ -742,31 +613,26 @@ export default function Player({ tracks }: { tracks: Track[] }) {
         </span>
       </div>
 
-      {uploadError && (
-        <p className="text-xs text-red-400">
-          {uploadError}
-        </p>
-      )}
+      {uploadError && <p className="text-xs text-red-400">{uploadError}</p>}
     </div>
   );
 
   /* ---------- UI ---------- */
-    return (
+  return (
     <div className="space-y-5">
-      {/* ====== 상단 플레이어 영역 (트랙이 있을 때만) ====== */}
       {!isEmpty && (
         <>
-          {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div>
               <h2 className="m-0 text-xl md:text-2xl font-semibold">
                 {track?.title ?? 'No track'}
               </h2>
-              <p className="mt-1 text-sm text-neutral-400">{track?.artist ?? ''}</p>
+              <p className="mt-1 text-sm text-neutral-400">
+                {track?.artist ?? ''}
+              </p>
             </div>
           </div>
 
-          {/* Audio & Spectrum */}
           <audio
             key={track?.src || 'empty'}
             ref={audioRef}
@@ -778,9 +644,9 @@ export default function Player({ tracks }: { tracks: Track[] }) {
               console.error('Audio error:', el.error, 'src=', el.src);
             }}
           />
+
           {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
 
-          {/* Seek bar */}
           <div className="space-y-2">
             <input
               className="w-full accent-violet-500"
@@ -797,7 +663,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
             </div>
           </div>
 
-          {/* Controls row */}
           <div className="flex items-center gap-3">
             <button
               onClick={prev}
@@ -823,9 +688,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
               <NextIcon />
             </button>
 
-            {/* 오른쪽 끝 아이콘들 */}
             <div className="ml-auto flex items-center gap-2">
-              {/* Volume */}
               <div
                 className="relative"
                 onMouseEnter={openVol}
@@ -862,7 +725,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                 )}
               </div>
 
-              {/* Shuffle */}
               <button
                 onClick={() => setShuffle((v) => !v)}
                 className={cx(
@@ -877,7 +739,6 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                 <ShuffleIcon />
               </button>
 
-              {/* Repeat */}
               <button
                 onClick={() =>
                   setRepeat((m) => (m === 'off' ? 'all' : m === 'all' ? 'one' : 'off'))
@@ -903,15 +764,10 @@ export default function Player({ tracks }: { tracks: Track[] }) {
         </>
       )}
 
-      {/* ====== 트랙이 전혀 없을 때 안내문 ====== */}
-      {isEmpty && (
-        <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
-      )}
+      {isEmpty && <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>}
 
-      {/* 업로드 버튼은 항상 노출 */}
       {uploadControls}
 
-      {/* ====== Playlist 영역 (항상 표시) ====== */}
       <div className="space-y-2">
         <div className="flex items-center justify-between gap-2 mb-1">
           <div className="flex flex-col">
@@ -937,41 +793,29 @@ export default function Player({ tracks }: { tracks: Track[] }) {
           )}
         </div>
 
-        {user && userPlaylists.length > 0 && (
-  <div className="flex flex-wrap gap-2 mb-2">
-    {userPlaylists.map((pl) => (
-      <div
-        key={pl.id}
-        className={cx(
-          "flex items-center gap-1 px-3 py-1 rounded-full text-xs border transition",
-          pl.id === activePlaylistId
-            ? "bg-violet-600/20 border-violet-500 text-violet-100"
-            : "bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500"
+        {user && (remotePlaylists?.length ?? 0) > 0 && (
+          <div className="flex flex-wrap gap-2 mb-2">
+            {remotePlaylists!.map((pl) => (
+              <div
+                key={pl.id}
+                className={cx(
+                  'flex items-center gap-1 px-3 py-1 rounded-full text-xs border transition',
+                  pl.id === remoteActivePlaylistId
+                    ? 'bg-violet-600/20 border-violet-500 text-violet-100'
+                    : 'bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500',
+                )}
+              >
+                <button
+                  onClick={() => handleSelectPlaylist(pl.id)}
+                  className="truncate max-w-[120px] text-left"
+                >
+                  {pl.name}
+                </button>
+              </div>
+            ))}
+          </div>
         )}
-      >
-        <button
-          onClick={() => handleSelectPlaylist(pl.id)}
-          className="truncate max-w-[100px] text-left"
-        >
-          {pl.name}
-        </button>
 
-        {pl.id !== "default" && (
-          <button
-            onClick={() => handleDeletePlaylist(pl.id)}
-            className="ml-1 text-[11px] text-neutral-400 hover:text-red-400"
-            title="재생목록 삭제"
-          >
-            ✕
-          </button>
-        )}
-      </div>
-    ))}
-  </div>
-)}
-
-
-        {/* 실제 트랙 리스트 (없으면 그냥 빈 목록) */}
         <ul className="space-y-2">
           {list.map((t, i) => {
             const active = i === currentIndex;
@@ -998,10 +842,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                 onDrop={(e) => onDropItem(i, e)}
                 onDragEnd={onDragEnd}
               >
-                <div
-                  className="px-2 cursor-grab text-neutral-500"
-                  title="Drag to reorder"
-                >
+                <div className="px-2 cursor-grab text-neutral-500" title="Drag to reorder">
                   ⋮⋮
                 </div>
 
@@ -1010,9 +851,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
                   className="flex-1 text-left px-2 py-2 rounded-lg transition"
                 >
                   <div className="font-medium truncate">{t.title}</div>
-                  <div className="text-xs text-neutral-400 truncate">
-                    {t.artist}
-                  </div>
+                  <div className="text-xs text-neutral-400 truncate">{t.artist}</div>
                 </button>
 
                 {canDelete(i) && (
