@@ -636,37 +636,82 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   };
 
   const handleDeletePlaylist = async (playlistId: string) => {
-  // 기본 재생목록 보호
-  if (playlistId === "default") {
-    alert("기본 재생목록은 삭제할 수 없습니다.");
+  if (!user) {
+    alert('로그인한 상태에서만 재생목록을 삭제할 수 있습니다.');
     return;
   }
 
+  // 기본 재생목록 보호
+  if (playlistId === 'default') {
+    alert('기본 재생목록은 삭제할 수 없습니다.');
+    return;
+  }
+
+  // 지우려는 재생목록 찾기
   const target = userPlaylists.find((p) => p.id === playlistId);
+  if (!target) return;
+
   const ok = window.confirm(
-    `재생목록 "${target?.name ?? ""}" 을(를) 삭제하시겠습니까?\n이 목록의 트랙도 함께 사라집니다.`
+    `재생목록 "${target.name}" 을(를) 삭제하시겠습니까?\n` +
+      '이 목록에서만 사용하는 Firebase Storage 파일도 함께 삭제됩니다.',
   );
   if (!ok) return;
 
-  // 1️⃣ Firestore 업데이트: 해당 플레이리스트 제거
-  const nextPlaylists = userPlaylists.filter((p) => p.id !== playlistId);
+  // 1️⃣ Storage 에서 지울 후보 URL 모으기
+  const others = userPlaylists.filter((p) => p.id !== playlistId);
+  const toDelete: string[] = [];
+
+  for (const track of target.tracks ?? []) {
+    const src = track.src;
+    // Firebase Storage URL이 아닌 건 건너뜀 (샘플 mp3 등)
+    if (!src || !src.startsWith('https://firebasestorage.googleapis.com/')) continue;
+
+    // 다른 재생목록에서도 쓰는지 확인
+    const usedElsewhere = others.some((pl) =>
+      (pl.tracks ?? []).some((t) => t.src === src),
+    );
+
+    // 이 플레이리스트에서만 쓰는 파일이면 삭제 후보로 추가
+    if (!usedElsewhere) {
+      toDelete.push(src);
+    }
+  }
+
+  // 2️⃣ 메모리/화면 상태에서 재생목록 제거
+  const nextPlaylists = others;
   setUserPlaylists(nextPlaylists);
 
-  // 2️⃣ 현재 선택된 재생목록이 삭제된 경우 → 다른 목록으로 이동
+  let newActiveId = activePlaylistId;
+
+  // 방금 삭제한 게 현재 선택된 재생목록이면, 다른 걸로 옮기기
   if (playlistId === activePlaylistId) {
-    const next = nextPlaylists[0];
-    setActivePlaylistId(next?.id ?? null);
-    setList(next ? [...tracks.slice(0, baseLenRef.current), ...(next.tracks ?? [])] : []);
+    const fallback = nextPlaylists[0] ?? null; // 남은 것 중 첫 번째 또는 null
+    newActiveId = fallback?.id ?? null;
+    setActivePlaylistId(newActiveId);
+
+    const nextTracks = fallback?.tracks ?? [];
+    setList([
+      ...tracks.slice(0, baseLenRef.current), // 샘플 곡들
+      ...nextTracks,                          // 새 active 재생목록 곡들
+    ]);
     setCurrentIndex(0);
     setIsPlaying(false);
   }
 
-  // 3️⃣ Firestore에 변경 저장
-  if (user) {
+  // 3️⃣ Firestore 문서 업데이트
+  try {
+    await saveUserPlaylists(user.uid, nextPlaylists, newActiveId ?? null);
+  } catch (err) {
+    console.error('플레이리스트 삭제 중 Firestore 오류:', err);
+  }
+
+  // 4️⃣ Firebase Storage 파일 실제 삭제
+  for (const url of toDelete) {
     try {
-      await saveUserPlaylists(user.uid, nextPlaylists, nextPlaylists[0]?.id ?? null);
+      const fileRef = ref(storage, url); // 전체 URL로 ref 생성 가능
+      await deleteObject(fileRef);
     } catch (err) {
-      console.error("플레이리스트 삭제 중 오류:", err);
+      console.error('Storage 파일 삭제 실패:', err);
     }
   }
 };
