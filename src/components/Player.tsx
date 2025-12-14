@@ -7,7 +7,7 @@ import type React from 'react';
 import Spectrum from './Spectrum';
 import type { Track } from '../data/tracks';
 import { fmt } from '../utils/time';
-import { loadUserPlaylist, saveUserPlaylist } from '@/api/playlist';
+import { listenUserPlaylist, saveUserPlaylist } from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
 const cx = (...a: Array<string | false | null | undefined>) =>
@@ -108,6 +108,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const remoteUpdateRef = useRef(false);  // Firestore에서 온 변경인지 표시
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -209,35 +210,30 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   useEffect(() => {
     if (!user) return;
 
-    let cancelled = false;
+    const uid = user.uid;
 
-    (async () => {
-      try {
-        const remoteTracks = await loadUserPlaylist(user.uid);
-        if (cancelled) return;
+    const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
+      // 아직 이 유저 문서가 없으면 (remoteTracks === null) → 그냥 무시
+      // => 지금 화면에 떠 있는 로컬 리스트 그대로 사용
+      if (remoteTracks === null) return;
 
-        if (remoteTracks.length === 0) {
-          // 서버에 아직 아무것도 없으면, 현재 로컬 상태(userTracks)를 업로드해도 됨.
-          const userTracks = list.slice(baseLenRef.current);
-          await saveUserPlaylist(user.uid, userTracks);
-          return;
-        }
+      // 여기서부터는 "서버에서 온 변경"이므로,
+      // 다음 useEffect에서 다시 서버로 저장하지 않도록 플래그를 세팅
+      remoteUpdateRef.current = true;
 
-        // 기본 tracks + 원격 tracks로 리스트 교체
-        setList(() => {
-          const base = tracks.slice(0, baseLenRef.current);
-          return [...base, ...remoteTracks];
-        });
+      setList(() => {
+        const base = tracks.slice(0, baseLenRef.current); // 샘플 곡
+        const userTracks = remoteTracks;                  // 서버에 저장된 곡들
+        return [...base, ...userTracks];
+      });
 
-        // 서버 기준으로는 첫 곡부터 재생
-        setCurrentIndex(0);
-      } catch (e) {
-        console.error('원격 플레이리스트 로딩 실패:', e);
-      }
-    })();
+      // 서버 기준으로는 첫 곡부터 재생
+      setCurrentIndex(0);
+    });
 
+    // 컴포넌트 언마운트 / user 변경 시 구독 해제
     return () => {
-      cancelled = true;
+      unsubscribe();
     };
   }, [user, tracks]);
 
@@ -249,11 +245,17 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     saveState({ index: currentIndex, volume, userTracks });
 
     // 2) 로그인 상태라면 Firestore에도 저장
-    if (user) {
-      saveUserPlaylist(user.uid, userTracks).catch((e) => {
-        console.error('플레이리스트 저장 실패:', e);
-      });
+    if (!user) return;
+
+    // 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
+    if (remoteUpdateRef.current) {
+      remoteUpdateRef.current = false;
+      return;
     }
+
+    saveUserPlaylist(user.uid, userTracks).catch((e) => {
+      console.error('플레이리스트 저장 실패:', e);
+    });
   }, [currentIndex, volume, list, user]);
 
 
