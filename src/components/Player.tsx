@@ -553,7 +553,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
               console.error('Audio error:', el.error, 'src=', el.src);
             }}
           />
-{track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
+          {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
 {/* 디버그용: 브라우저 기본 컨트롤로 같은 src 재생해보기 */}
 {track?.src && (
   <audio controls src={track.src} style={{ width: '100%', marginTop: 8 }} />
