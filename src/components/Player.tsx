@@ -108,6 +108,8 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
+  // 🔽 추가: 서버 플레이리스트를 한 번이라도 정상적으로 읽었는지 표시
+  const readyToSyncRef = useRef(false);
   const remoteUpdateRef = useRef(false);  // Firestore에서 온 변경인지 표시
 
   // 게스트(비로그인) 상태에서 추가한 트랙들을 따로 기억해 두는 용도
