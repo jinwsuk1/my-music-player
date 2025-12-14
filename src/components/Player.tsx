@@ -548,6 +548,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
             ref={audioRef}
             src={track?.src}
             preload="metadata"
+            crossOrigin="anonymous"
             onError={(e) => {
               const el = e.currentTarget;
               console.error('Audio error:', el.error, 'src=', el.src);

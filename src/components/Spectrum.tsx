@@ -50,10 +50,10 @@ export default function Spectrum({ audioRef, src }: Props) {
     }
 
     // 🔴 Firebase 같은 외부 도메인이면 Web Audio를 건너뜀 (재생만)
-    if (!sameOrigin) {
-      console.warn('[Spectrum] cross-origin src, skip Web Audio:', srcUrl);
-      return;
-    }
+    // if (!sameOrigin) {
+    //   console.warn('[Spectrum] cross-origin src, skip Web Audio:', srcUrl);
+    //   return;
+    // }
 
     if (!ready) return;
 
