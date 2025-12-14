@@ -10,7 +10,8 @@ import { fmt } from '../utils/time';
 import { loadUserPlaylist, saveUserPlaylist } from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
-const cx = (...a: string[]) => a.filter(Boolean).join(' ');
+const cx = (...a: Array<string | false | null | undefined>) =>
+  a.filter(Boolean).join(' ');
 
 const PlayIcon = (p: React.SVGProps<SVGSVGElement>) => (
   <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
@@ -102,6 +103,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { user } = useAuth();  // ← 추가
   const [uploading, setUploading] = useState(false); // 🔽 업로드 상태
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
@@ -344,6 +346,9 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
   e.currentTarget.value = '';
   if (!file) return;
 
+  setUploadError(null);
+  setUploading(true);
+
   try {
     setUploading(true);
 
@@ -379,7 +384,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     }
   } catch (err) {
     console.error('업로드 중 오류:', err);
-    alert('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+    setUploadError('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
   } finally {
     setUploading(false);
   }
@@ -519,19 +524,51 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     // 클릭 억제 플래그는 select()에서 처리
   };
 
+    const uploadControls = (
+    <div className="space-y-1">
+      <div className="flex items-center gap-3">
+        <label
+          className={cx(
+            'inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm',
+            uploading && 'opacity-60 cursor-not-allowed'
+          )}
+        >
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={onFile}
+            className="hidden"
+            disabled={uploading}
+          />
+          {uploading ? '업로드 중...' : 'Add local track'}
+        </label>
+
+        <span className="text-xs text-neutral-500">
+          {user
+            ? '이 계정의 플레이리스트가 Firestore에 저장됩니다.'
+            : '(*로그인하지 않으면 이 브라우저에만 저장됩니다)'}
+        </span>
+      </div>
+
+      {uploadError && (
+        <p className="text-xs text-red-400">
+          {uploadError}
+        </p>
+      )}
+    </div>
+  );
+
+
   /* ---------- UI ---------- */
   return (
     <div className="space-y-5">
       {isEmpty ? (
         <div className="space-y-4">
           <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
-          <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
-            <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
-            Add local track
-          </label>
-          <p className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</p>
+          {uploadControls}
         </div>
       ) : (
+
         <>
           {/* Header */}
           <div className="flex items-start justify-between gap-3">
@@ -556,9 +593,9 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
           />
           {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
 {/* 디버그용: 브라우저 기본 컨트롤로 같은 src 재생해보기 */}
-{track?.src && (
+{/* {track?.src && (
   <audio controls src={track.src} style={{ width: '100%', marginTop: 8 }} />
-)}
+)} */}
 
 
 
@@ -678,13 +715,7 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
           </div>
 
           {/* Upload */}
-          <div className="flex items-center gap-3">
-            <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
-              <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
-              Add local track
-            </label>
-            <span className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</span>
-          </div>
+          {uploadControls}
 
           {/* Playlist (drag anywhere on tile) */}
           <div>
