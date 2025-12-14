@@ -8,3 +8,4 @@ export interface Track {
 export const tracks: Track[] = [
   
 ];
+export default tracks;
