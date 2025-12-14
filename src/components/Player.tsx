@@ -1,6 +1,6 @@
 import { storage } from '@/firebase';
 import { useAuth } from '@/auth/AuthContext';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
@@ -392,26 +392,47 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
 
   const canDelete = (i: number) => i >= baseLenRef.current;
   const removeAt = (i: number) => {
-    setList((prev) => {
-      const removed = prev[i];
-      const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
+  setList((prev) => {
+    const removed = prev[i];
+    const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
 
-      setCurrentIndex((ci) => {
-        if (i === ci) {
-          if (nextList.length === 0) return 0;
-          return Math.min(ci, nextList.length - 1);
-        }
-        return i < ci ? ci - 1 : ci;
-      });
-
-      if (removed?.src?.startsWith('blob:')) {
-        try {
-          URL.revokeObjectURL(removed.src);
-        } catch {}
+    // 현재 곡 인덱스 보정
+    setCurrentIndex((ci) => {
+      if (i === ci) {
+        if (nextList.length === 0) return 0;
+        return Math.min(ci, nextList.length - 1);
       }
-      return nextList;
+      return i < ci ? ci - 1 : ci;
     });
-  };
+
+    // 지울 곡이 없으면 여기서 끝
+    if (!removed) return nextList;
+
+    // 1) 로컬 blob URL 정리
+    if (removed.src?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(removed.src);
+      } catch {}
+    }
+
+    // 2) Firebase Storage에 올라간 곡이면 Storage에서도 삭제
+    if (
+      user && // 로그인 상태이고
+      removed.src?.startsWith('https://firebasestorage.googleapis.com/')
+    ) {
+      try {
+        const fileRef = ref(storage, removed.src);
+        deleteObject(fileRef).catch((err) => {
+          console.error('Storage 파일 삭제 실패:', err);
+        });
+      } catch (err) {
+        console.error('Storage 삭제 ref 생성 실패:', err);
+      }
+    }
+
+    return nextList;
+  });
+};
 
   /* ---------- Keyboard shortcuts ---------- */
   useEffect(() => {
