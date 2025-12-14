@@ -9,8 +9,8 @@ const firebaseConfig = {
   authDomain: 'my-music-player-7359d.firebaseapp.com',
   projectId: 'my-music-player-7359d',
   storageBucket: 'my-music-player-7359d.firebasestorage.app',
-  messagingSenderId: '...',
-  appId: '...',
+  messagingSenderId: '234314426224',
+  appId: '1:234314426224:web:a8f335870332b2698651b5',
 };
 
 const app = initializeApp(firebaseConfig);

@@ -198,6 +198,16 @@ const [userPlaylists, setUserPlaylists] = useState<UserPlaylist[]>([]);
     if (!user) return;
     if (!activePlaylistId) return;
 
+    const activePl = userPlaylists.find((p) => p.id === activePlaylistId);
+    const currentTracks = activePl?.tracks ?? [];
+
+  // 🔸변화가 없으면 저장하지 않음
+    const same =
+    currentTracks.length === nextTracks.length &&
+    currentTracks.every((t, i) => t.src === nextTracks[i]?.src);
+
+  if (same) return;
+
     const nextPlaylists = userPlaylists.map((pl) =>
       pl.id === activePlaylistId ? { ...pl, tracks: nextTracks } : pl,
     );
