@@ -1,16 +1,17 @@
 import { storage } from '@/firebase';
 import { useAuth } from '@/auth/AuthContext';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import Spectrum from './Spectrum';
 import type { Track } from '../data/tracks';
 import { fmt } from '../utils/time';
-import { loadUserPlaylist, saveUserPlaylist } from '@/api/playlist';
+import { listenUserPlaylist, saveUserPlaylist } from '@/api/playlist';
 
 /* ---------- Small utils & Icons ---------- */
-const cx = (...a: string[]) => a.filter(Boolean).join(' ');
+const cx = (...a: Array<string | false | null | undefined>) =>
+  a.filter(Boolean).join(' ');
 
 const PlayIcon = (p: React.SVGProps<SVGSVGElement>) => (
   <svg viewBox="0 0 24 24" width="20" height="20" {...p}>
@@ -102,10 +103,12 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const { user } = useAuth();  // ← 추가
   const [uploading, setUploading] = useState(false); // 🔽 업로드 상태
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const baseLenRef = useRef<number>(tracks.length);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
+  const remoteUpdateRef = useRef(false);  // Firestore에서 온 변경인지 표시
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
@@ -207,35 +210,30 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   useEffect(() => {
     if (!user) return;
 
-    let cancelled = false;
+    const uid = user.uid;
 
-    (async () => {
-      try {
-        const remoteTracks = await loadUserPlaylist(user.uid);
-        if (cancelled) return;
+    const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
+      // 아직 이 유저 문서가 없으면 (remoteTracks === null) → 그냥 무시
+      // => 지금 화면에 떠 있는 로컬 리스트 그대로 사용
+      if (remoteTracks === null) return;
 
-        if (remoteTracks.length === 0) {
-          // 서버에 아직 아무것도 없으면, 현재 로컬 상태(userTracks)를 업로드해도 됨.
-          const userTracks = list.slice(baseLenRef.current);
-          await saveUserPlaylist(user.uid, userTracks);
-          return;
-        }
+      // 여기서부터는 "서버에서 온 변경"이므로,
+      // 다음 useEffect에서 다시 서버로 저장하지 않도록 플래그를 세팅
+      remoteUpdateRef.current = true;
 
-        // 기본 tracks + 원격 tracks로 리스트 교체
-        setList(() => {
-          const base = tracks.slice(0, baseLenRef.current);
-          return [...base, ...remoteTracks];
-        });
+      setList(() => {
+        const base = tracks.slice(0, baseLenRef.current); // 샘플 곡
+        const userTracks = remoteTracks;                  // 서버에 저장된 곡들
+        return [...base, ...userTracks];
+      });
 
-        // 서버 기준으로는 첫 곡부터 재생
-        setCurrentIndex(0);
-      } catch (e) {
-        console.error('원격 플레이리스트 로딩 실패:', e);
-      }
-    })();
+      // 서버 기준으로는 첫 곡부터 재생
+      setCurrentIndex(0);
+    });
 
+    // 컴포넌트 언마운트 / user 변경 시 구독 해제
     return () => {
-      cancelled = true;
+      unsubscribe();
     };
   }, [user, tracks]);
 
@@ -247,11 +245,17 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     saveState({ index: currentIndex, volume, userTracks });
 
     // 2) 로그인 상태라면 Firestore에도 저장
-    if (user) {
-      saveUserPlaylist(user.uid, userTracks).catch((e) => {
-        console.error('플레이리스트 저장 실패:', e);
-      });
+    if (!user) return;
+
+    // 방금 onSnapshot으로부터 받은 변경이면 다시 서버로 쓰지 않는다.
+    if (remoteUpdateRef.current) {
+      remoteUpdateRef.current = false;
+      return;
     }
+
+    saveUserPlaylist(user.uid, userTracks).catch((e) => {
+      console.error('플레이리스트 저장 실패:', e);
+    });
   }, [currentIndex, volume, list, user]);
 
 
@@ -339,71 +343,98 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   };
 
     /* ---------- Upload ---------- */
-  const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.currentTarget.value = '';
-    if (!file) return;
+const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const file = e.target.files?.[0];
+  e.currentTarget.value = '';
+  if (!file) return;
 
-    // 업로드 중 에러가 나더라도 앱이 죽지 않도록 try/catch
-    try {
-      let src: string;
-      let artist = 'Local';
+  setUploadError(null);
+  setUploading(true);
 
-      if (user) {
-        // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
-        const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
-        const fileRef = ref(storage, path);
+  try {
+    setUploading(true);
 
-        // 2) 파일을 Firebase Storage에 업로드
-        const snap = await uploadBytes(fileRef, file);
+    let src: string;
+    let artist = 'Local';
 
-        // 3) 다운로드 가능한 HTTPS URL 가져오기
-        src = await getDownloadURL(snap.ref);
+    if (user) {
+      // 1) Storage 경로: tracks/{uid}/{timestamp-파일이름}
+      const path = `tracks/${user.uid}/${Date.now()}-${file.name}`;
+      const fileRef = ref(storage, path);
 
-        // 4) 아티스트 표시는 로그인한 사용자 정보로
-        artist = user.displayName ?? user.email ?? 'Me';
-      } else {
-        // 로그인 안 된 상태에서는 예전처럼 blob URL로만 사용
-        src = URL.createObjectURL(file);
-      }
+      // 2) Firebase Storage 업로드
+      const snap = await uploadBytes(fileRef, file);
 
-      const t: Track = { title: file.name, artist, src };
+      // 3) 다운로드 URL (항상 같은 값)
+      src = await getDownloadURL(snap.ref);
 
-      const wasEmpty = list.length === 0;
-      setList((prev) => [...prev, t]);
-
-      if (wasEmpty) {
-        setCurrentIndex(0);
-        setIsPlaying(true);
-      }
-    } catch (err) {
-      console.error('업로드 중 오류:', err);
-      alert('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+      // 4) Firestore에 보이는 artist 값
+      artist = user.displayName ?? user.email ?? 'Me';
+    } else {
+      // 로그인 안 한 경우에는 예전처럼 blob만 사용
+      src = URL.createObjectURL(file);
     }
-  };
+
+    const t: Track = { title: file.name, artist, src };
+
+    const wasEmpty = list.length === 0;
+    setList((prev) => [...prev, t]);
+
+    if (wasEmpty) {
+      setCurrentIndex(0);
+      setIsPlaying(true);
+    }
+  } catch (err) {
+    console.error('업로드 중 오류:', err);
+    setUploadError('업로드 중 오류가 발생했습니다. 콘솔 로그를 확인해 주세요.');
+  } finally {
+    setUploading(false);
+  }
+};
 
   const canDelete = (i: number) => i >= baseLenRef.current;
   const removeAt = (i: number) => {
-    setList((prev) => {
-      const removed = prev[i];
-      const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
+  setList((prev) => {
+    const removed = prev[i];
+    const nextList = prev.slice(0, i).concat(prev.slice(i + 1));
 
-      setCurrentIndex((ci) => {
-        if (i === ci) {
-          if (nextList.length === 0) return 0;
-          return Math.min(ci, nextList.length - 1);
-        }
-        return i < ci ? ci - 1 : ci;
-      });
-
-      if (removed?.src?.startsWith('blob:')) {
-        try {
-          URL.revokeObjectURL(removed.src);
-        } catch {}
+    // 현재 곡 인덱스 보정
+    setCurrentIndex((ci) => {
+      if (i === ci) {
+        if (nextList.length === 0) return 0;
+        return Math.min(ci, nextList.length - 1);
       }
-      return nextList;
+      return i < ci ? ci - 1 : ci;
     });
-  };
+
+    // 지울 곡이 없으면 여기서 끝
+    if (!removed) return nextList;
+
+    // 1) 로컬 blob URL 정리
+    if (removed.src?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(removed.src);
+      } catch {}
+    }
+
+    // 2) Firebase Storage에 올라간 곡이면 Storage에서도 삭제
+    if (
+      user && // 로그인 상태이고
+      removed.src?.startsWith('https://firebasestorage.googleapis.com/')
+    ) {
+      try {
+        const fileRef = ref(storage, removed.src);
+        deleteObject(fileRef).catch((err) => {
+          console.error('Storage 파일 삭제 실패:', err);
+        });
+      } catch (err) {
+        console.error('Storage 삭제 ref 생성 실패:', err);
+      }
+    }
+
+    return nextList;
+  });
+};
 
   /* ---------- Keyboard shortcuts ---------- */
   useEffect(() => {
@@ -516,19 +547,51 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     // 클릭 억제 플래그는 select()에서 처리
   };
 
+    const uploadControls = (
+    <div className="space-y-1">
+      <div className="flex items-center gap-3">
+        <label
+          className={cx(
+            'inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm',
+            uploading && 'opacity-60 cursor-not-allowed'
+          )}
+        >
+          <input
+            type="file"
+            accept="audio/*"
+            onChange={onFile}
+            className="hidden"
+            disabled={uploading}
+          />
+          {uploading ? '업로드 중...' : 'Add local track'}
+        </label>
+
+        <span className="text-xs text-neutral-500">
+          {user
+            ? '이 계정의 플레이리스트가 Firestore에 저장됩니다.'
+            : '(*로그인하지 않으면 이 브라우저에만 저장됩니다)'}
+        </span>
+      </div>
+
+      {uploadError && (
+        <p className="text-xs text-red-400">
+          {uploadError}
+        </p>
+      )}
+    </div>
+  );
+
+
   /* ---------- UI ---------- */
   return (
     <div className="space-y-5">
       {isEmpty ? (
         <div className="space-y-4">
           <p className="text-neutral-300">아직 추가된 트랙이 없어요.</p>
-          <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
-            <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
-            Add local track
-          </label>
-          <p className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</p>
+          {uploadControls}
         </div>
       ) : (
+
         <>
           {/* Header */}
           <div className="flex items-start justify-between gap-3">
@@ -539,8 +602,25 @@ export default function Player({ tracks }: { tracks: Track[] }) {
           </div>
 
           {/* Audio first, then Spectrum */}
-          <audio key={track?.src || 'empty'} ref={audioRef} src={track?.src} preload="metadata" />
+          {/* // --- 수정 후 --- */}
+          <audio
+            key={track?.src || 'empty'}
+            ref={audioRef}
+            src={track?.src}
+            preload="metadata"
+            crossOrigin="anonymous"
+            onError={(e) => {
+              const el = e.currentTarget;
+              console.error('Audio error:', el.error, 'src=', el.src);
+            }}
+          />
           {track?.src ? <Spectrum audioRef={audioRef} src={track.src} /> : null}
+{/* 디버그용: 브라우저 기본 컨트롤로 같은 src 재생해보기 */}
+{/* {track?.src && (
+  <audio controls src={track.src} style={{ width: '100%', marginTop: 8 }} />
+)} */}
+
+
 
           {/* Seek bar */}
           <div className="space-y-2">
@@ -658,13 +738,7 @@ export default function Player({ tracks }: { tracks: Track[] }) {
           </div>
 
           {/* Upload */}
-          <div className="flex items-center gap-3">
-            <label className="inline-flex items-center justify-center cursor-pointer px-3 py-2 rounded-lg border border-neutral-700 bg-neutral-800 hover:bg-neutral-750 transition text-sm">
-              <input type="file" accept="audio/*" onChange={onFile} className="hidden" />
-              Add local track
-            </label>
-            <span className="text-xs text-neutral-500">(*브라우저에만 저장됩니다)</span>
-          </div>
+          {uploadControls}
 
           {/* Playlist (drag anywhere on tile) */}
           <div>
