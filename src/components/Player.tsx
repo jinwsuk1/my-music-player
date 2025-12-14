@@ -106,6 +106,8 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const [uploadError, setUploadError] = useState<string | null>(null);
 
   const baseLenRef = useRef<number>(tracks.length);
+  // 서버 플레이리스트를 최소 한 번은 불러왔는지 여부
+  const hasLoadedRemoteRef = useRef<boolean>(false);
   const [list, setList] = useState<Track[]>(tracks);
   const [currentIndex, setCurrentIndex] = useState(0);
   // 🔽 추가: 서버 플레이리스트를 한 번이라도 정상적으로 읽었는지 표시
