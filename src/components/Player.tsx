@@ -110,6 +110,9 @@ export default function Player({ tracks }: { tracks: Track[] }) {
   const [currentIndex, setCurrentIndex] = useState(0);
   const remoteUpdateRef = useRef(false);  // Firestore에서 온 변경인지 표시
 
+  // 게스트(비로그인) 상태에서 추가한 트랙들을 따로 기억해 두는 용도
+  const guestTracksRef = useRef<Track[]>([]);
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [current, setCurrent] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -206,36 +209,129 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     if (audioRef.current) audioRef.current.volume = vol;
   }, []);
 
-    // 로그인한 사용자의 Firestore 플레이리스트 불러오기
-  useEffect(() => {
-    if (!user) return;
+    
+  // 로그인한 사용자의 Firestore 플레이리스트 실시간 동기화
+useEffect(() => {
+  if (!user) return;
 
-    const uid = user.uid;
+  const uid = user.uid;
+  let handledInitial = false; // 이 유저에 대한 "첫 스냅샷"인지 표시
 
-    const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
-      // 아직 이 유저 문서가 없으면 (remoteTracks === null) → 그냥 무시
-      // => 지금 화면에 떠 있는 로컬 리스트 그대로 사용
-      if (remoteTracks === null) return;
+  const unsubscribe = listenUserPlaylist(uid, (remoteTracks) => {
+    const isInitial = !handledInitial;
+    handledInitial = true;
 
-      // 여기서부터는 "서버에서 온 변경"이므로,
-      // 다음 useEffect에서 다시 서버로 저장하지 않도록 플래그를 세팅
-      remoteUpdateRef.current = true;
+    // remoteTracks === null 이면 이 유저에 대한 문서가 아직 없는 상태
+    const serverTracks = remoteTracks ?? [];
 
-      setList(() => {
-        const base = tracks.slice(0, baseLenRef.current); // 샘플 곡
-        const userTracks = remoteTracks;                  // 서버에 저장된 곡들
-        return [...base, ...userTracks];
-      });
+    // 1) 로그인 직후 첫 스냅샷 + 게스트에서 추가한 곡이 있는 경우
+    if (isInitial && guestTracksRef.current.length > 0) {
+      const guestTracks = [...guestTracksRef.current];
+      // 한 번 처리 후에는 다시 쓰지 않도록 비워둔다
+      guestTracksRef.current = [];
 
-      // 서버 기준으로는 첫 곡부터 재생
-      setCurrentIndex(0);
+      const hasRemote = serverTracks.length > 0;
+
+      const msg = hasRemote
+        ? '현재 이 브라우저에서 추가한 곡들이 있습니다.\n' +
+          '이 곡들을 계정 플레이리스트에 추가할까요?\n\n' +
+          '확인: 추가 / 취소: 계정 목록만 사용'
+        : '현재 이 브라우저에서 추가한 곡들이 있습니다.\n' +
+          '이 곡들을 이 계정의 첫 플레이리스트로 저장할까요?';
+
+      const useLocal = window.confirm(msg);
+
+      (async () => {
+        try {
+          let finalTracks: Track[] = serverTracks;
+
+          if (useLocal) {
+            const imported: Track[] = [];
+
+            for (const t of guestTracks) {
+              // 이론상 게스트 트랙은 거의 blob: URL 이지만
+              // 혹시 http(s)/gs:// 같은 경우는 그대로 사용
+              const isRemoteUrl =
+                t.src.startsWith('http://') ||
+                t.src.startsWith('https://') ||
+                t.src.startsWith('gs://');
+
+              if (isRemoteUrl) {
+                imported.push(t);
+                continue;
+              }
+
+              try {
+                // blob URL에서 실제 파일 blob 가져와서 Storage에 업로드
+                const res = await fetch(t.src);
+                const blob = await res.blob();
+
+                const safeTitle =
+                  (t.title ?? 'track').replace(/[^a-zA-Z0-9가-힣_.-]/g, '_') || 'track';
+                const fileName = `${Date.now()}-${Math.random()
+                  .toString(36)
+                  .slice(2, 8)}-${safeTitle}.mp3`;
+
+                const fileRef = ref(storage, `tracks/${uid}/${fileName}`);
+                await uploadBytes(fileRef, blob);
+                const url = await getDownloadURL(fileRef);
+
+                imported.push({ ...t, src: url });
+              } catch (err) {
+                console.error('게스트 트랙 업로드 실패:', err);
+              }
+            }
+
+            // 원래 서버에 있던 곡이 있으면 뒤에 이어붙이고,
+            // 없으면 imported 만 사용
+            finalTracks = hasRemote ? [...serverTracks, ...imported] : imported;
+          } else {
+            // "아니오"를 선택한 경우 → 서버 목록만 사용
+            finalTracks = serverTracks;
+          }
+
+          // Firestore에 최종 플레이리스트 저장
+          await saveUserPlaylist(uid, finalTracks);
+
+          // "서버에서 온 변경"이므로 다음 persist 에서 다시 저장하지 않도록 플래그 설정
+          remoteUpdateRef.current = true;
+
+          // UI에도 반영
+          setList(() => {
+            const base = tracks.slice(0, baseLenRef.current);
+            return [...base, ...finalTracks];
+          });
+          setCurrentIndex(0);
+        } catch (err) {
+          console.error('로그인 시 게스트 트랙 병합 실패:', err);
+        }
+      })();
+
+      return; // 여기서 끝. 아래 일반 스냅샷 처리는 타지 않는다.
+    }
+
+    // 2) 그 외 일반적인 스냅샷 처리 (실시간 동기화)
+    if (remoteTracks === null) {
+      // 서버에 아직 문서가 없고, 게스트 곡도 없는 경우 → 아무것도 안 함
+      return;
+    }
+
+    // 서버에서 온 변경 → localStorage/Firestore 재저장 막기용 플래그
+    remoteUpdateRef.current = true;
+
+    setList(() => {
+      const base = tracks.slice(0, baseLenRef.current);
+      return [...base, ...remoteTracks];
     });
 
-    // 컴포넌트 언마운트 / user 변경 시 구독 해제
-    return () => {
-      unsubscribe();
-    };
-  }, [user, tracks]);
+    setCurrentIndex(0);
+  });
+
+  // 컴포넌트 언마운트 / user 변경 시 구독 해제
+  return () => {
+    unsubscribe();
+  };
+}, [user, tracks]);
 
    // persist (localStorage + Firestore 동기화)
   useEffect(() => {
@@ -376,6 +472,11 @@ const onFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     }
 
     const t: Track = { title: file.name, artist, src };
+
+    // 🔹 로그인 안 한 상태에서 추가된 트랙은 따로 저장해 둔다
+    if (!user) {
+      guestTracksRef.current = [...guestTracksRef.current, t];
+    }
 
     const wasEmpty = list.length === 0;
     setList((prev) => [...prev, t]);
