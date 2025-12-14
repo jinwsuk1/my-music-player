@@ -635,6 +635,42 @@ export default function Player({ tracks }: { tracks: Track[] }) {
     });
   };
 
+  const handleDeletePlaylist = async (playlistId: string) => {
+  // 기본 재생목록 보호
+  if (playlistId === "default") {
+    alert("기본 재생목록은 삭제할 수 없습니다.");
+    return;
+  }
+
+  const target = userPlaylists.find((p) => p.id === playlistId);
+  const ok = window.confirm(
+    `재생목록 "${target?.name ?? ""}" 을(를) 삭제하시겠습니까?\n이 목록의 트랙도 함께 사라집니다.`
+  );
+  if (!ok) return;
+
+  // 1️⃣ Firestore 업데이트: 해당 플레이리스트 제거
+  const nextPlaylists = userPlaylists.filter((p) => p.id !== playlistId);
+  setUserPlaylists(nextPlaylists);
+
+  // 2️⃣ 현재 선택된 재생목록이 삭제된 경우 → 다른 목록으로 이동
+  if (playlistId === activePlaylistId) {
+    const next = nextPlaylists[0];
+    setActivePlaylistId(next?.id ?? null);
+    setList(next ? [...tracks.slice(0, baseLenRef.current), ...(next.tracks ?? [])] : []);
+    setCurrentIndex(0);
+    setIsPlaying(false);
+  }
+
+  // 3️⃣ Firestore에 변경 저장
+  if (user) {
+    try {
+      await saveUserPlaylists(user.uid, nextPlaylists, nextPlaylists[0]?.id ?? null);
+    } catch (err) {
+      console.error("플레이리스트 삭제 중 오류:", err);
+    }
+  }
+};
+
   const uploadControls = (
     <div className="space-y-1">
       <div className="flex items-center gap-3">
@@ -857,24 +893,38 @@ export default function Player({ tracks }: { tracks: Track[] }) {
         </div>
 
         {user && userPlaylists.length > 0 && (
-          <div className="flex flex-wrap gap-2 mb-2">
-            {userPlaylists.map((pl) => (
-              <button
-                key={pl.id}
-                type="button"
-                onClick={() => handleSelectPlaylist(pl.id)}
-                className={cx(
-                  'px-3 py-1 rounded-full text-xs border transition',
-                  pl.id === activePlaylistId
-                    ? 'bg-violet-600/20 border-violet-500 text-violet-100'
-                    : 'bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500',
-                )}
-              >
-                {pl.name}
-              </button>
-            ))}
-          </div>
+  <div className="flex flex-wrap gap-2 mb-2">
+    {userPlaylists.map((pl) => (
+      <div
+        key={pl.id}
+        className={cx(
+          "flex items-center gap-1 px-3 py-1 rounded-full text-xs border transition",
+          pl.id === activePlaylistId
+            ? "bg-violet-600/20 border-violet-500 text-violet-100"
+            : "bg-neutral-900/50 border-neutral-700 text-neutral-300 hover:border-neutral-500"
         )}
+      >
+        <button
+          onClick={() => handleSelectPlaylist(pl.id)}
+          className="truncate max-w-[100px] text-left"
+        >
+          {pl.name}
+        </button>
+
+        {pl.id !== "default" && (
+          <button
+            onClick={() => handleDeletePlaylist(pl.id)}
+            className="ml-1 text-[11px] text-neutral-400 hover:text-red-400"
+            title="재생목록 삭제"
+          >
+            ✕
+          </button>
+        )}
+      </div>
+    ))}
+  </div>
+)}
+
 
         {/* 실제 트랙 리스트 (없으면 그냥 빈 목록) */}
         <ul className="space-y-2">
