@@ -37,6 +37,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const loginWithGoogle = async () => {
+    googleProvider.setCustomParameters({
+    prompt: 'select_account',
+  });
     await signInWithPopup(auth, googleProvider);
     // 성공하면 onAuthStateChanged가 자동으로 user 업데이트
   };
